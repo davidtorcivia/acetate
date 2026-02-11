@@ -225,10 +225,25 @@ func (s *SessionStore) DeleteAdminSessionsForUser(userID int64) error {
 	return err
 }
 
-// VerifyPassphrase compares a plaintext passphrase against a bcrypt hash.
-func VerifyPassphrase(passphrase, hash string) bool {
-	err := bcrypt.CompareHashAndPassword([]byte(hash), []byte(passphrase))
-	return err == nil
+// VerifyPassphrase compares a plaintext passphrase against either a bcrypt hash
+// or a legacy/plaintext config value.
+func VerifyPassphrase(passphrase, stored string) bool {
+	if strings.TrimSpace(stored) == "" {
+		return false
+	}
+
+	if isLikelyBcryptHash(stored) {
+		return bcrypt.CompareHashAndPassword([]byte(stored), []byte(passphrase)) == nil
+	}
+
+	return subtle.ConstantTimeCompare([]byte(stored), []byte(passphrase)) == 1
+}
+
+func isLikelyBcryptHash(v string) bool {
+	if len(v) < 59 {
+		return false
+	}
+	return strings.HasPrefix(v, "$2a$") || strings.HasPrefix(v, "$2b$") || strings.HasPrefix(v, "$2y$")
 }
 
 func (s *SessionStore) cleanupLoop() {

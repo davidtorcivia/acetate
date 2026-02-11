@@ -20,12 +20,14 @@ var (
 	errAdminInvalidUserUpdate    = errors.New("invalid admin user update")
 	errAdminCannotDeactivateSelf = errors.New("cannot deactivate your own account")
 	errAdminLastActiveAdmin      = errors.New("at least one active admin is required")
+	errAdminFounderProtected     = errors.New("the original admin account cannot be deactivated")
 )
 
 type adminUserView struct {
 	ID                   int64  `json:"id"`
 	Username             string `json:"username"`
 	IsActive             bool   `json:"is_active"`
+	IsFounder            bool   `json:"is_founder"`
 	RequirePasswordReset bool   `json:"require_password_reset"`
 	CreatedAt            string `json:"created_at"`
 	UpdatedAt            string `json:"updated_at"`
@@ -87,8 +89,9 @@ func (s *Server) handleAdminUpdateUser(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var req struct {
-		IsActive             *bool `json:"is_active,omitempty"`
-		RequirePasswordReset *bool `json:"require_password_reset,omitempty"`
+		Username             *string `json:"username,omitempty"`
+		IsActive             *bool   `json:"is_active,omitempty"`
+		RequirePasswordReset *bool   `json:"require_password_reset,omitempty"`
 	}
 	if err := decodeJSONBody(r, &req); err != nil {
 		jsonError(w, "bad request", http.StatusBadRequest)
@@ -101,18 +104,25 @@ func (s *Server) handleAdminUpdateUser(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	user, err := s.updateAdminUser(actorID, targetID, req.IsActive, req.RequirePasswordReset)
+	user, err := s.updateAdminUser(actorID, targetID, req.Username, req.IsActive, req.RequirePasswordReset)
 	if err != nil {
 		switch {
 		case errors.Is(err, errAdminUserNotFound):
 			jsonError(w, "not found", http.StatusNotFound)
+		case errors.Is(err, errAdminUserExists):
+			jsonError(w, "username already exists", http.StatusConflict)
 		case errors.Is(err, errAdminInvalidUserUpdate),
 			errors.Is(err, errAdminCannotDeactivateSelf),
-			errors.Is(err, errAdminLastActiveAdmin):
+			errors.Is(err, errAdminLastActiveAdmin),
+			errors.Is(err, errAdminFounderProtected):
 			jsonError(w, err.Error(), http.StatusBadRequest)
 		default:
-			log.Printf("update admin user error: %v", err)
-			jsonError(w, "internal error", http.StatusInternalServerError)
+			if strings.Contains(strings.ToLower(err.Error()), "username") {
+				jsonError(w, "invalid username", http.StatusBadRequest)
+			} else {
+				log.Printf("update admin user error: %v", err)
+				jsonError(w, "internal error", http.StatusInternalServerError)
+			}
 		}
 		return
 	}
@@ -122,7 +132,7 @@ func (s *Server) handleAdminUpdateUser(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) listAdminUsers() ([]adminUserView, error) {
 	rows, err := s.db.Query(
-		"SELECT id, username, is_active, require_password_reset, created_at, updated_at, COALESCE(last_login_at, '') FROM admin_users ORDER BY username ASC",
+		"SELECT id, username, is_active, CASE WHEN id = (SELECT MIN(id) FROM admin_users) THEN 1 ELSE 0 END AS is_founder, require_password_reset, created_at, updated_at, COALESCE(last_login_at, '') FROM admin_users ORDER BY username ASC",
 	)
 	if err != nil {
 		return nil, fmt.Errorf("query admin users: %w", err)
@@ -134,12 +144,14 @@ func (s *Server) listAdminUsers() ([]adminUserView, error) {
 		var (
 			user       adminUserView
 			isActive   int
+			isFounder  int
 			needsReset int
 		)
 		if err := rows.Scan(
 			&user.ID,
 			&user.Username,
 			&isActive,
+			&isFounder,
 			&needsReset,
 			&user.CreatedAt,
 			&user.UpdatedAt,
@@ -148,6 +160,7 @@ func (s *Server) listAdminUsers() ([]adminUserView, error) {
 			return nil, fmt.Errorf("scan admin user: %w", err)
 		}
 		user.IsActive = isActive == 1
+		user.IsFounder = isFounder == 1
 		user.RequirePasswordReset = needsReset == 1
 		users = append(users, user)
 	}
@@ -196,12 +209,12 @@ func (s *Server) createAdminUser(username, password string, requirePasswordReset
 	return s.getAdminUserViewByID(userID)
 }
 
-func (s *Server) updateAdminUser(actorID, targetID int64, isActive, requirePasswordReset *bool) (adminUserView, error) {
+func (s *Server) updateAdminUser(actorID, targetID int64, username *string, isActive, requirePasswordReset *bool) (adminUserView, error) {
 	user := adminUserView{}
 	if actorID <= 0 || targetID <= 0 {
 		return user, errAdminInvalidUserUpdate
 	}
-	if isActive == nil && requirePasswordReset == nil {
+	if username == nil && isActive == nil && requirePasswordReset == nil {
 		return user, errAdminInvalidUserUpdate
 	}
 
@@ -212,17 +225,40 @@ func (s *Server) updateAdminUser(actorID, targetID int64, isActive, requirePassw
 	defer tx.Rollback()
 
 	var (
-		currentActive int
-		currentReset  int
+		currentUsername string
+		currentActive   int
+		currentReset    int
 	)
 	if err := tx.QueryRow(
-		"SELECT is_active, require_password_reset FROM admin_users WHERE id = ?",
+		"SELECT username, is_active, require_password_reset FROM admin_users WHERE id = ?",
 		targetID,
-	).Scan(&currentActive, &currentReset); err != nil {
+	).Scan(&currentUsername, &currentActive, &currentReset); err != nil {
 		if err == sql.ErrNoRows {
 			return user, errAdminUserNotFound
 		}
 		return user, fmt.Errorf("query admin user for update: %w", err)
+	}
+
+	nextUsername := currentUsername
+	if username != nil {
+		normalizedUsername, err := normalizeAdminUsername(*username)
+		if err != nil {
+			return user, err
+		}
+		nextUsername = normalizedUsername
+		if !strings.EqualFold(nextUsername, currentUsername) {
+			var existing int
+			if err := tx.QueryRow(
+				"SELECT COUNT(*) FROM admin_users WHERE username = ? AND id != ?",
+				nextUsername,
+				targetID,
+			).Scan(&existing); err != nil {
+				return user, fmt.Errorf("check admin username uniqueness: %w", err)
+			}
+			if existing > 0 {
+				return user, errAdminUserExists
+			}
+		}
 	}
 
 	nextActive := currentActive == 1
@@ -232,6 +268,14 @@ func (s *Server) updateAdminUser(actorID, targetID int64, isActive, requirePassw
 	nextReset := currentReset == 1
 	if requirePasswordReset != nil {
 		nextReset = *requirePasswordReset
+	}
+
+	founderID, err := getFounderAdminUserIDTx(tx)
+	if err != nil {
+		return user, fmt.Errorf("query founder admin user id: %w", err)
+	}
+	if founderID > 0 && targetID == founderID && !nextActive {
+		return user, errAdminFounderProtected
 	}
 
 	if !nextActive {
@@ -251,7 +295,8 @@ func (s *Server) updateAdminUser(actorID, targetID int64, isActive, requirePassw
 	}
 
 	_, err = tx.Exec(
-		"UPDATE admin_users SET is_active = ?, require_password_reset = ?, updated_at = ? WHERE id = ?",
+		"UPDATE admin_users SET username = ?, is_active = ?, require_password_reset = ?, updated_at = ? WHERE id = ?",
+		nextUsername,
 		boolToInt(nextActive),
 		boolToInt(nextReset),
 		time.Now().UTC(),
@@ -276,15 +321,17 @@ func (s *Server) getAdminUserViewByID(userID int64) (adminUserView, error) {
 	user := adminUserView{}
 	var (
 		isActive   int
+		isFounder  int
 		needsReset int
 	)
 	err := s.db.QueryRow(
-		"SELECT id, username, is_active, require_password_reset, created_at, updated_at, COALESCE(last_login_at, '') FROM admin_users WHERE id = ?",
+		"SELECT id, username, is_active, CASE WHEN id = (SELECT MIN(id) FROM admin_users) THEN 1 ELSE 0 END AS is_founder, require_password_reset, created_at, updated_at, COALESCE(last_login_at, '') FROM admin_users WHERE id = ?",
 		userID,
 	).Scan(
 		&user.ID,
 		&user.Username,
 		&isActive,
+		&isFounder,
 		&needsReset,
 		&user.CreatedAt,
 		&user.UpdatedAt,
@@ -298,8 +345,20 @@ func (s *Server) getAdminUserViewByID(userID int64) (adminUserView, error) {
 	}
 
 	user.IsActive = isActive == 1
+	user.IsFounder = isFounder == 1
 	user.RequirePasswordReset = needsReset == 1
 	return user, nil
+}
+
+func getFounderAdminUserIDTx(tx *sql.Tx) (int64, error) {
+	var founderID sql.NullInt64
+	if err := tx.QueryRow("SELECT MIN(id) FROM admin_users").Scan(&founderID); err != nil {
+		return 0, err
+	}
+	if !founderID.Valid {
+		return 0, nil
+	}
+	return founderID.Int64, nil
 }
 
 func boolToInt(v bool) int {

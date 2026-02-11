@@ -159,6 +159,13 @@ func TestVerifyPassphrase(t *testing.T) {
 	if VerifyPassphrase("wrongpass", string(hash)) {
 		t.Error("wrong passphrase should not verify")
 	}
+
+	if !VerifyPassphrase("plain-pass", "plain-pass") {
+		t.Error("plain passphrase should verify")
+	}
+	if VerifyPassphrase("wrongpass", "plain-pass") {
+		t.Error("wrong plain passphrase should not verify")
+	}
 }
 
 func TestSessionRotation(t *testing.T) {

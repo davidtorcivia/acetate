@@ -956,6 +956,210 @@ func TestAdminUserManagementAndForcedPasswordResetFlow(t *testing.T) {
 	}
 }
 
+func TestAdminConfigDoesNotExposePasswordHash(t *testing.T) {
+	env := setupTest(t)
+	adminCookies := env.authenticateAdmin(t)
+
+	req, _ := http.NewRequest(http.MethodGet, env.ts.URL+"/admin/api/config", nil)
+	for _, c := range adminCookies {
+		req.AddCookie(c)
+	}
+
+	resp, err := env.ts.Client().Do(req)
+	if err != nil {
+		t.Fatalf("config request: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200", resp.StatusCode)
+	}
+
+	var payload map[string]interface{}
+	if err := json.NewDecoder(resp.Body).Decode(&payload); err != nil {
+		t.Fatalf("decode config payload: %v", err)
+	}
+
+	if _, ok := payload["password_hash"]; ok {
+		t.Fatalf("password_hash should not be exposed in config payload: %+v", payload)
+	}
+
+	passwordSet, ok := payload["password_set"].(bool)
+	if !ok || !passwordSet {
+		t.Fatalf("expected password_set=true, got payload=%+v", payload)
+	}
+	if _, ok := payload["password"].(string); !ok {
+		t.Fatalf("expected password string in config payload, got %+v", payload)
+	}
+}
+
+func TestAdminUpdateListeningPasswordStoresPlaintext(t *testing.T) {
+	env := setupTest(t)
+	adminCookies := env.authenticateAdmin(t)
+
+	updateBody, _ := json.Marshal(map[string]string{
+		"passphrase": "plain-visible-passphrase",
+	})
+	updateReq, _ := http.NewRequest(http.MethodPut, env.ts.URL+"/admin/api/password", bytes.NewReader(updateBody))
+	updateReq.Header.Set("Content-Type", "application/json")
+	updateReq.Header.Set("Origin", env.ts.URL)
+	for _, c := range adminCookies {
+		updateReq.AddCookie(c)
+	}
+
+	updateResp, err := env.ts.Client().Do(updateReq)
+	if err != nil {
+		t.Fatalf("update listening password request: %v", err)
+	}
+	updateResp.Body.Close()
+	if updateResp.StatusCode != http.StatusOK {
+		t.Fatalf("update listening password status = %d, want 200", updateResp.StatusCode)
+	}
+
+	cfg := env.srv.config.Get()
+	if cfg.Password != "plain-visible-passphrase" {
+		t.Fatalf("stored listener password = %q, want plaintext value", cfg.Password)
+	}
+
+	// Listener auth should still succeed with plaintext-configured password.
+	authBody, _ := json.Marshal(map[string]string{"passphrase": "plain-visible-passphrase"})
+	authResp, err := env.ts.Client().Post(env.ts.URL+"/api/auth", "application/json", bytes.NewReader(authBody))
+	if err != nil {
+		t.Fatalf("listener auth request: %v", err)
+	}
+	authResp.Body.Close()
+	if authResp.StatusCode != http.StatusOK {
+		t.Fatalf("listener auth status = %d, want 200", authResp.StatusCode)
+	}
+}
+
+func TestAdminFounderCannotBeDeactivatedByAnotherAdmin(t *testing.T) {
+	env := setupTest(t)
+	adminCookies := env.authenticateAdmin(t)
+
+	var founderID int64
+	if err := env.srv.db.QueryRow("SELECT id FROM admin_users WHERE username = ?", testAdminUsername).Scan(&founderID); err != nil {
+		t.Fatalf("query founder admin id: %v", err)
+	}
+
+	createBody, _ := json.Marshal(map[string]interface{}{
+		"username":               "sreadmin",
+		"password":               "sre-admin-pass-123",
+		"require_password_reset": false,
+	})
+	createReq, _ := http.NewRequest(http.MethodPost, env.ts.URL+"/admin/api/admin-users", bytes.NewReader(createBody))
+	createReq.Header.Set("Content-Type", "application/json")
+	createReq.Header.Set("Origin", env.ts.URL)
+	for _, c := range adminCookies {
+		createReq.AddCookie(c)
+	}
+	createResp, err := env.ts.Client().Do(createReq)
+	if err != nil {
+		t.Fatalf("create admin user request: %v", err)
+	}
+	createResp.Body.Close()
+	if createResp.StatusCode != http.StatusCreated {
+		t.Fatalf("create admin status = %d, want 201", createResp.StatusCode)
+	}
+
+	otherCookies, _, status := env.authenticateAdminAs(t, "sreadmin", "sre-admin-pass-123")
+	if status != http.StatusOK {
+		t.Fatalf("secondary admin auth status = %d, want 200", status)
+	}
+
+	deactivateFounderBody, _ := json.Marshal(map[string]interface{}{
+		"is_active": false,
+	})
+	deactivateFounderReq, _ := http.NewRequest(http.MethodPut, env.ts.URL+"/admin/api/admin-users/"+strconv.FormatInt(founderID, 10), bytes.NewReader(deactivateFounderBody))
+	deactivateFounderReq.Header.Set("Content-Type", "application/json")
+	deactivateFounderReq.Header.Set("Origin", env.ts.URL)
+	for _, c := range otherCookies {
+		deactivateFounderReq.AddCookie(c)
+	}
+
+	deactivateFounderResp, err := env.ts.Client().Do(deactivateFounderReq)
+	if err != nil {
+		t.Fatalf("founder deactivate request: %v", err)
+	}
+	defer deactivateFounderResp.Body.Close()
+	if deactivateFounderResp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("founder deactivate status = %d, want 400", deactivateFounderResp.StatusCode)
+	}
+
+	var payload map[string]string
+	if err := json.NewDecoder(deactivateFounderResp.Body).Decode(&payload); err != nil {
+		t.Fatalf("decode founder deactivate payload: %v", err)
+	}
+	if !strings.Contains(strings.ToLower(payload["error"]), "original admin") {
+		t.Fatalf("unexpected founder protection error payload: %+v", payload)
+	}
+}
+
+func TestAdminCanRenameAnotherUser(t *testing.T) {
+	env := setupTest(t)
+	adminCookies := env.authenticateAdmin(t)
+
+	createBody, _ := json.Marshal(map[string]interface{}{
+		"username":               "oldname",
+		"password":               "rename-pass-123",
+		"require_password_reset": false,
+	})
+	createReq, _ := http.NewRequest(http.MethodPost, env.ts.URL+"/admin/api/admin-users", bytes.NewReader(createBody))
+	createReq.Header.Set("Content-Type", "application/json")
+	createReq.Header.Set("Origin", env.ts.URL)
+	for _, c := range adminCookies {
+		createReq.AddCookie(c)
+	}
+	createResp, err := env.ts.Client().Do(createReq)
+	if err != nil {
+		t.Fatalf("create admin user request: %v", err)
+	}
+	if createResp.StatusCode != http.StatusCreated {
+		createResp.Body.Close()
+		t.Fatalf("create admin status = %d, want 201", createResp.StatusCode)
+	}
+	var created struct {
+		ID int64 `json:"id"`
+	}
+	if err := json.NewDecoder(createResp.Body).Decode(&created); err != nil {
+		createResp.Body.Close()
+		t.Fatalf("decode created admin: %v", err)
+	}
+	createResp.Body.Close()
+	if created.ID <= 0 {
+		t.Fatalf("invalid created admin id: %+v", created)
+	}
+
+	renameBody, _ := json.Marshal(map[string]interface{}{
+		"username": "newname",
+	})
+	renameReq, _ := http.NewRequest(http.MethodPut, env.ts.URL+"/admin/api/admin-users/"+strconv.FormatInt(created.ID, 10), bytes.NewReader(renameBody))
+	renameReq.Header.Set("Content-Type", "application/json")
+	renameReq.Header.Set("Origin", env.ts.URL)
+	for _, c := range adminCookies {
+		renameReq.AddCookie(c)
+	}
+
+	renameResp, err := env.ts.Client().Do(renameReq)
+	if err != nil {
+		t.Fatalf("rename admin request: %v", err)
+	}
+	renameResp.Body.Close()
+	if renameResp.StatusCode != http.StatusOK {
+		t.Fatalf("rename admin status = %d, want 200", renameResp.StatusCode)
+	}
+
+	_, _, status := env.authenticateAdminAs(t, "oldname", "rename-pass-123")
+	if status != http.StatusUnauthorized {
+		t.Fatalf("old username auth status = %d, want 401", status)
+	}
+
+	_, _, status = env.authenticateAdminAs(t, "newname", "rename-pass-123")
+	if status != http.StatusOK {
+		t.Fatalf("new username auth status = %d, want 200", status)
+	}
+}
+
 func TestAdminAnalyticsFiltersByStem(t *testing.T) {
 	env := setupTest(t)
 	adminCookies := env.authenticateAdmin(t)

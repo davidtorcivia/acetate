@@ -3,6 +3,11 @@
     'use strict';
 
     var loginPanel, setupPanel, dashboard, loginForm, setupForm, usernameInput, passwordInput, loginError, passwordResetBanner;
+    var trackMetaByStem = {};
+    var adminUsers = [];
+    var currentAdminUser = '';
+    var heatmapTooltipEl = null;
+    var heatmapTooltipTarget = null;
 
     function init() {
         loginPanel = document.getElementById('admin-login');
@@ -20,9 +25,12 @@
         document.getElementById('btn-logout').addEventListener('click', handleLogout);
         document.getElementById('password-form').addEventListener('submit', handlePasswordUpdate);
         document.getElementById('admin-password-form').addEventListener('submit', handleAdminPasswordUpdate);
+        document.getElementById('admin-user-create-form').addEventListener('submit', handleCreateAdminUser);
         document.getElementById('cover-form').addEventListener('submit', handleCoverUpload);
         document.getElementById('btn-save-tracks').addEventListener('click', handleSaveTracks);
+        document.getElementById('admin-users-list').addEventListener('click', handleAdminUserAction);
 
+        setupHeatmapTooltip();
         checkSetupStatus();
     }
 
@@ -114,11 +122,12 @@
             .then(function (r) {
                 if (r.ok) {
                     return r.json();
-                } else {
-                    loginError.textContent = 'Invalid credentials';
+                }
+                return parseErrorResponse(r).then(function (msg) {
+                    loginError.textContent = msg || 'Invalid credentials';
                     loginError.classList.remove('hidden');
                     return null;
-                }
+                });
             })
             .then(function (payload) {
                 if (!payload) return;
@@ -141,6 +150,7 @@
         loginPanel.classList.remove('hidden');
         setupPanel.classList.add('hidden');
         dashboard.classList.add('hidden');
+        hideHeatmapTooltip();
         usernameInput.value = '';
         passwordInput.value = '';
         setPasswordResetMode(false);
@@ -151,6 +161,7 @@
         setupPanel.classList.remove('hidden');
         loginPanel.classList.add('hidden');
         dashboard.classList.add('hidden');
+        hideHeatmapTooltip();
         document.getElementById('setup-username').focus();
     }
 
@@ -163,17 +174,20 @@
         }
         loadConfig().then(function (needsReset) {
             if (!needsReset) {
-                loadTracks();
-                loadAnalytics();
+                loadTracks().then(function () {
+                    loadAdminUsers();
+                    loadAnalytics();
+                });
             } else {
                 clearAnalyticsTables();
                 document.getElementById('track-list').innerHTML = '';
+                document.getElementById('admin-users-list').innerHTML = '';
             }
         });
     }
 
     function setPasswordResetMode(enabled) {
-        var gatedSections = ['section-password', 'section-cover', 'section-tracks', 'section-analytics'];
+        var gatedSections = ['section-password', 'section-cover', 'section-tracks', 'section-analytics', 'section-admin-users'];
         gatedSections.forEach(function (id) {
             var el = document.getElementById(id);
             if (!el) return;
@@ -195,6 +209,127 @@
         }
     }
 
+    function setupHeatmapTooltip() {
+        if (heatmapTooltipEl) return;
+
+        heatmapTooltipEl = document.createElement('div');
+        heatmapTooltipEl.id = 'heatmap-tooltip';
+        heatmapTooltipEl.className = 'heatmap-tooltip hidden';
+        document.body.appendChild(heatmapTooltipEl);
+
+        document.addEventListener('pointerover', onHeatmapPointerOver);
+        document.addEventListener('pointermove', onHeatmapPointerMove);
+        document.addEventListener('pointerout', onHeatmapPointerOut);
+        document.addEventListener('scroll', hideHeatmapTooltip, true);
+    }
+
+    function findHeatmapBin(target) {
+        if (!target || !target.closest) return null;
+        return target.closest('.heatmap-bin[data-tooltip]');
+    }
+
+    function onHeatmapPointerOver(e) {
+        var bin = findHeatmapBin(e.target);
+        if (!bin) return;
+
+        var relatedBin = findHeatmapBin(e.relatedTarget);
+        if (bin === relatedBin) return;
+
+        showHeatmapTooltip(bin, e.clientX, e.clientY);
+    }
+
+    function onHeatmapPointerMove(e) {
+        if (!heatmapTooltipTarget || !heatmapTooltipEl) return;
+        positionHeatmapTooltip(e.clientX, e.clientY);
+    }
+
+    function onHeatmapPointerOut(e) {
+        if (!heatmapTooltipTarget) return;
+
+        var toBin = findHeatmapBin(e.relatedTarget);
+        if (toBin && toBin !== heatmapTooltipTarget) {
+            showHeatmapTooltip(toBin, e.clientX, e.clientY);
+            return;
+        }
+        if (toBin === heatmapTooltipTarget) {
+            return;
+        }
+
+        hideHeatmapTooltip();
+    }
+
+    function showHeatmapTooltip(bin, x, y) {
+        if (!heatmapTooltipEl || !bin) return;
+
+        var text = bin.getAttribute('data-tooltip') || '';
+        if (!text) return;
+
+        heatmapTooltipTarget = bin;
+        heatmapTooltipEl.textContent = text;
+        heatmapTooltipEl.classList.remove('hidden');
+        positionHeatmapTooltip(x, y);
+    }
+
+    function positionHeatmapTooltip(x, y) {
+        if (!heatmapTooltipEl || heatmapTooltipEl.classList.contains('hidden')) return;
+
+        var viewportPad = 10;
+        var offset = 14;
+        var rect = heatmapTooltipEl.getBoundingClientRect();
+
+        var left = x + offset;
+        var top = y + offset;
+
+        if (left+rect.width+viewportPad > window.innerWidth) {
+            left = window.innerWidth - rect.width - viewportPad;
+        }
+        if (left < viewportPad) {
+            left = viewportPad;
+        }
+
+        if (top+rect.height+viewportPad > window.innerHeight) {
+            top = y - rect.height - offset;
+        }
+        if (top < viewportPad) {
+            top = viewportPad;
+        }
+
+        heatmapTooltipEl.style.left = left + 'px';
+        heatmapTooltipEl.style.top = top + 'px';
+    }
+
+    function hideHeatmapTooltip() {
+        heatmapTooltipTarget = null;
+        if (!heatmapTooltipEl) return;
+        heatmapTooltipEl.classList.add('hidden');
+    }
+
+    function setStatus(el, message, type) {
+        if (!el) return;
+        if (!message) {
+            el.textContent = '';
+            el.className = 'status hidden';
+            return;
+        }
+        el.textContent = message;
+        el.className = 'status ' + (type === 'error' ? 'error' : 'success');
+    }
+
+    function parseErrorResponse(response) {
+        return response.text().then(function (text) {
+            if (!text) return '';
+            try {
+                var payload = JSON.parse(text);
+                if (payload && typeof payload.error === 'string') {
+                    return payload.error;
+                }
+            } catch (e) {
+                // Ignore JSON parse errors and fall through to raw text.
+            }
+            return text;
+        });
+    }
+
     // --- Config ---
     function loadConfig() {
         return fetch('/admin/api/config', { credentials: 'same-origin' })
@@ -205,10 +340,11 @@
             .then(function (data) {
                 document.getElementById('cfg-title').textContent = data.title || '(not set)';
                 document.getElementById('cfg-artist').textContent = data.artist || '(not set)';
-                document.getElementById('cfg-admin-user').textContent = data.admin_user || '(unknown)';
+                currentAdminUser = data.admin_user || '';
+                document.getElementById('cfg-admin-user').textContent = currentAdminUser || '(unknown)';
                 document.getElementById('cfg-password').textContent = data.password_set
-                    ? data.password_hash
-                    : '(not set)';
+                    ? (data.password || '(empty)')
+                    : 'Not set';
                 document.getElementById('cfg-tracks').textContent = data.track_count + ' tracks';
                 var needsReset = !!data.password_reset_required;
                 setPasswordResetMode(needsReset);
@@ -235,16 +371,18 @@
             body: JSON.stringify({ passphrase: pass })
         })
             .then(function (r) {
-                status.classList.remove('hidden');
                 if (r.ok) {
-                    status.textContent = 'Password updated';
-                    status.className = 'status success';
+                    setStatus(status, 'Listening password updated', 'success');
                     document.getElementById('new-password').value = '';
                     loadConfig();
-                } else {
-                    status.textContent = 'Failed to update';
-                    status.className = 'status error';
+                    return;
                 }
+                return parseErrorResponse(r).then(function (msg) {
+                    setStatus(status, msg || 'Failed to update listening password', 'error');
+                });
+            })
+            .catch(function () {
+                setStatus(status, 'Failed to update listening password', 'error');
             });
     }
 
@@ -266,17 +404,238 @@
             })
         })
             .then(function (r) {
-                status.classList.remove('hidden');
                 if (r.ok) {
-                    status.textContent = 'Admin password updated. Please log in again.';
-                    status.className = 'status success';
+                    setStatus(status, 'Admin password updated. Please log in again.', 'success');
                     document.getElementById('current-admin-password').value = '';
                     document.getElementById('new-admin-password').value = '';
                     setTimeout(showLogin, 500);
-                } else {
-                    status.textContent = 'Failed to update admin password';
-                    status.className = 'status error';
+                    return;
                 }
+                return parseErrorResponse(r).then(function (msg) {
+                    setStatus(status, msg || 'Failed to update admin password', 'error');
+                });
+            })
+            .catch(function () {
+                setStatus(status, 'Failed to update admin password', 'error');
+            });
+    }
+
+    // --- Admin users ---
+    function loadAdminUsers() {
+        var list = document.getElementById('admin-users-list');
+        var status = document.getElementById('admin-users-status');
+
+        list.innerHTML = '<div class="empty-state">Loading admin users...</div>';
+
+        return fetch('/admin/api/admin-users', { credentials: 'same-origin' })
+            .then(function (r) {
+                if (!r.ok) {
+                    return parseErrorResponse(r).then(function (msg) {
+                        throw new Error(msg || 'Failed to load admin users');
+                    });
+                }
+                return r.json();
+            })
+            .then(function (payload) {
+                adminUsers = payload && payload.users ? payload.users : [];
+                renderAdminUsers(adminUsers);
+                setStatus(status, '', 'success');
+            })
+            .catch(function (err) {
+                adminUsers = [];
+                list.innerHTML = '<div class="empty-state">Unable to load admin users.</div>';
+                setStatus(status, err.message || 'Unable to load admin users', 'error');
+            });
+    }
+
+    function renderAdminUsers(users) {
+        var list = document.getElementById('admin-users-list');
+        if (!users || !users.length) {
+            list.innerHTML = '<div class="empty-state">No admin users found.</div>';
+            return;
+        }
+
+        var sorted = users.slice().sort(function (a, b) {
+            if (!!a.is_founder !== !!b.is_founder) {
+                return a.is_founder ? -1 : 1;
+            }
+            return String(a.username || '').localeCompare(String(b.username || ''));
+        });
+
+        var rows = sorted.map(function (u) {
+            var username = String(u.username || '');
+            var isSelf = currentAdminUser && username.toLowerCase() === currentAdminUser.toLowerCase();
+            var disableActive = !!u.is_founder || !!isSelf;
+            var badges = '';
+            if (u.is_founder) {
+                badges += '<span class="admin-badge founder">Original</span>';
+            }
+            if (isSelf) {
+                badges += '<span class="admin-badge self">You</span>';
+            }
+            if (!u.is_active) {
+                badges += '<span class="admin-badge inactive">Inactive</span>';
+            }
+
+            var disableHint = '';
+            if (u.is_founder) {
+                disableHint = 'Original admin cannot be deactivated';
+            } else if (isSelf) {
+                disableHint = 'You cannot deactivate your own account';
+            }
+
+            return '' +
+                '<tr class="admin-user-row ' + (u.is_active ? '' : 'is-inactive') + '" data-user-id="' + Number(u.id) + '">' +
+                '<td>' +
+                '<input type="text" class="admin-user-username" value="' + escapeAttr(username) + '" autocomplete="off">' +
+                '</td>' +
+                '<td>' +
+                '<div class="admin-badges">' + (badges || '<span class="admin-badge standard">Standard</span>') + '</div>' +
+                (disableHint ? '<div class="inline-note">' + escapeHtml(disableHint) + '</div>' : '') +
+                '</td>' +
+                '<td>' +
+                '<label class="switch-label">' +
+                '<input type="checkbox" class="admin-user-active" ' + (u.is_active ? 'checked' : '') + (disableActive ? ' disabled' : '') + '>' +
+                '<span>Active</span>' +
+                '</label>' +
+                '</td>' +
+                '<td>' +
+                '<label class="switch-label">' +
+                '<input type="checkbox" class="admin-user-reset" ' + (u.require_password_reset ? 'checked' : '') + '>' +
+                '<span>Force reset</span>' +
+                '</label>' +
+                '</td>' +
+                '<td>' + escapeHtml(formatDateTime(u.last_login_at) || 'Never') + '</td>' +
+                '<td>' +
+                '<button type="button" class="btn-small admin-user-save" data-user-id="' + Number(u.id) + '">Save</button>' +
+                '</td>' +
+                '</tr>';
+        }).join('');
+
+        list.innerHTML = '' +
+            '<div class="admin-users-table-wrap">' +
+            '<table class="data-table admin-users-table">' +
+            '<thead>' +
+            '<tr>' +
+            '<th>Username</th>' +
+            '<th>Role</th>' +
+            '<th>Status</th>' +
+            '<th>Reset Policy</th>' +
+            '<th>Last Login</th>' +
+            '<th>Action</th>' +
+            '</tr>' +
+            '</thead>' +
+            '<tbody>' + rows + '</tbody>' +
+            '</table>' +
+            '</div>';
+    }
+
+    function handleCreateAdminUser(e) {
+        e.preventDefault();
+
+        var usernameEl = document.getElementById('new-admin-username');
+        var passwordEl = document.getElementById('new-admin-user-password');
+        var forceResetEl = document.getElementById('new-admin-force-reset');
+        var status = document.getElementById('admin-users-status');
+        var submitBtn = e.target.querySelector('button[type="submit"]');
+
+        var username = usernameEl.value.trim();
+        var password = passwordEl.value;
+        var requirePasswordReset = !!forceResetEl.checked;
+
+        if (!username || !password) {
+            setStatus(status, 'Username and temporary password are required', 'error');
+            return;
+        }
+
+        submitBtn.disabled = true;
+
+        fetch('/admin/api/admin-users', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            credentials: 'same-origin',
+            body: JSON.stringify({
+                username: username,
+                password: password,
+                require_password_reset: requirePasswordReset
+            })
+        })
+            .then(function (r) {
+                if (r.ok) {
+                    return r.json().then(function () {
+                        usernameEl.value = '';
+                        passwordEl.value = '';
+                        forceResetEl.checked = true;
+                        setStatus(status, 'Admin user created', 'success');
+                        return loadAdminUsers();
+                    });
+                }
+                return parseErrorResponse(r).then(function (msg) {
+                    throw new Error(msg || 'Failed to create admin user');
+                });
+            })
+            .catch(function (err) {
+                setStatus(status, err.message || 'Failed to create admin user', 'error');
+            })
+            .finally(function () {
+                submitBtn.disabled = false;
+            });
+    }
+
+    function handleAdminUserAction(e) {
+        var target = e.target;
+        if (!target || !target.classList.contains('admin-user-save')) {
+            return;
+        }
+
+        var row = target.closest('tr.admin-user-row');
+        if (!row) return;
+
+        var userID = Number(row.getAttribute('data-user-id') || target.getAttribute('data-user-id') || 0);
+        var usernameEl = row.querySelector('.admin-user-username');
+        var activeEl = row.querySelector('.admin-user-active');
+        var resetEl = row.querySelector('.admin-user-reset');
+        var status = document.getElementById('admin-users-status');
+
+        var username = usernameEl ? usernameEl.value.trim() : '';
+        var isActive = activeEl ? !!activeEl.checked : false;
+        var requireReset = resetEl ? !!resetEl.checked : false;
+
+        if (!userID || !username) {
+            setStatus(status, 'Username is required', 'error');
+            return;
+        }
+
+        target.disabled = true;
+
+        fetch('/admin/api/admin-users/' + encodeURIComponent(String(userID)), {
+            method: 'PUT',
+            headers: { 'Content-Type': 'application/json' },
+            credentials: 'same-origin',
+            body: JSON.stringify({
+                username: username,
+                is_active: isActive,
+                require_password_reset: requireReset
+            })
+        })
+            .then(function (r) {
+                if (r.ok) {
+                    setStatus(status, 'Admin user updated', 'success');
+                    return loadConfig().then(function (needsReset) {
+                        if (!needsReset) {
+                            return loadAdminUsers();
+                        }
+                    });
+                }
+                return parseErrorResponse(r).then(function (msg) {
+                    throw new Error(msg || 'Failed to update admin user');
+                });
+            })
+            .catch(function (err) {
+                setStatus(status, err.message || 'Failed to update admin user', 'error');
+            })
+            .finally(function () {
+                target.disabled = false;
             });
     }
 
@@ -297,15 +656,17 @@
             body: formData
         })
             .then(function (r) {
-                status.classList.remove('hidden');
                 if (r.ok) {
-                    status.textContent = 'Cover uploaded';
-                    status.className = 'status success';
+                    setStatus(status, 'Cover uploaded', 'success');
                     fileInput.value = '';
-                } else {
-                    status.textContent = 'Upload failed';
-                    status.className = 'status error';
+                    return;
                 }
+                return parseErrorResponse(r).then(function (msg) {
+                    setStatus(status, msg || 'Upload failed', 'error');
+                });
+            })
+            .catch(function () {
+                setStatus(status, 'Upload failed', 'error');
             });
     }
 
@@ -313,14 +674,31 @@
     var currentTracks = [];
 
     function loadTracks() {
-        fetch('/admin/api/tracks', { credentials: 'same-origin' })
-            .then(function (r) { return r.json(); })
+        trackMetaByStem = {};
+        return fetch('/admin/api/tracks', { credentials: 'same-origin' })
+            .then(function (r) {
+                if (!r.ok) {
+                    throw new Error('tracks');
+                }
+                return r.json();
+            })
             .then(function (tracks) {
                 currentTracks = tracks;
+                tracks.forEach(function (track) {
+                    trackMetaByStem[track.stem] = {
+                        title: track.title || '',
+                        duration: Number(track.duration || 0)
+                    };
+                });
                 renderTrackList(tracks);
-                // Also load title/artist into form
-                fetch('/admin/api/config', { credentials: 'same-origin' })
-                    .then(function (r) { return r.json(); })
+                // Also load title/artist into form.
+                return fetch('/admin/api/config', { credentials: 'same-origin' })
+                    .then(function (r) {
+                        if (!r.ok) {
+                            throw new Error('config');
+                        }
+                        return r.json();
+                    })
                     .then(function (cfg) {
                         document.getElementById('album-title').value = cfg.title || '';
                         document.getElementById('album-artist').value = cfg.artist || '';
@@ -341,8 +719,8 @@
             item.innerHTML =
                 '<span class="drag-handle">&#x2261;</span>' +
                 '<span class="track-stem">' + escapeHtml(track.stem) + '</span>' +
-                '<input type="text" class="track-title-input" value="' + escapeHtml(track.title) + '" placeholder="Title">' +
-                '<input type="text" class="track-display-idx" value="' + escapeHtml(track.display_index || '') + '" placeholder="#">';
+                '<input type="text" class="track-title-input" value="' + escapeAttr(track.title) + '" placeholder="Title">' +
+                '<input type="text" class="track-display-idx" value="' + escapeAttr(track.display_index || '') + '" placeholder="#">';
 
             // Drag events
             item.addEventListener('dragstart', onDragStart);
@@ -418,22 +796,29 @@
             })
         })
             .then(function (r) {
-                status.classList.remove('hidden');
                 if (r.ok) {
-                    status.textContent = 'Saved';
-                    status.className = 'status success';
+                    setStatus(status, 'Saved', 'success');
                     loadConfig();
-                } else {
-                    status.textContent = 'Save failed';
-                    status.className = 'status error';
+                    return;
                 }
+                return parseErrorResponse(r).then(function (msg) {
+                    setStatus(status, msg || 'Save failed', 'error');
+                });
+            })
+            .catch(function () {
+                setStatus(status, 'Save failed', 'error');
             });
     }
 
     // --- Analytics ---
     function loadAnalytics() {
         fetch('/admin/api/analytics', { credentials: 'same-origin' })
-            .then(function (r) { return r.json(); })
+            .then(function (r) {
+                if (!r.ok) {
+                    throw new Error('analytics');
+                }
+                return r.json();
+            })
             .then(function (data) {
                 renderOverview(data.overall);
                 renderTrackStats(data.tracks, data.heatmaps);
@@ -462,34 +847,72 @@
         }
 
         tracks.forEach(function (t) {
+            var meta = trackMetaByStem[t.stem] || {};
+            var displayTitle = meta.title || t.stem;
+            var subline = (meta.title && meta.title !== t.stem)
+                ? '<div class="stem-subline">' + escapeHtml(t.stem) + '</div>'
+                : '';
+
             var tr = document.createElement('tr');
             tr.innerHTML =
-                '<td>' + escapeHtml(t.stem) + '</td>' +
-                '<td>' + t.total_plays + '</td>' +
-                '<td>' + t.unique_sessions + '</td>' +
-                '<td>' + t.completions + '</td>' +
-                '<td>' + (t.completion_rate * 100).toFixed(0) + '%</td>' +
-                '<td>' + renderHeatmap(heatmaps && heatmaps[t.stem]) + '</td>';
+                '<td><div class="track-name-cell">' + escapeHtml(displayTitle) + subline + '</div></td>' +
+                '<td>' + Number(t.total_plays || 0) + '</td>' +
+                '<td>' + Number(t.unique_sessions || 0) + '</td>' +
+                '<td>' + Number(t.completions || 0) + '</td>' +
+                '<td>' + (Number(t.completion_rate || 0) * 100).toFixed(0) + '%</td>' +
+                '<td>' + renderHeatmap(heatmaps && heatmaps[t.stem], t.stem) + '</td>';
             tbody.appendChild(tr);
         });
     }
 
-    function renderHeatmap(bins) {
-        if (!bins) return '-';
+    function renderHeatmap(bins, stem) {
+        if (!bins || !bins.length) return '-';
 
         var maxCount = 0;
-        bins.forEach(function (b) { if (b.count > maxCount) maxCount = b.count; });
+        var totalCount = 0;
+        bins.forEach(function (b) {
+            var c = Number(b.count || 0);
+            totalCount += c;
+            if (c > maxCount) maxCount = c;
+        });
+
+        var meta = trackMetaByStem[stem] || {};
+        var duration = Number(meta.duration || 0);
+
         if (maxCount === 0) {
-            return '<span class="heatmap">' + bins.map(function () {
+            return '<span class="heatmap heatmap-empty" title="No dropout events for this track">' + bins.map(function () {
                 return '<span class="heatmap-bin heatmap-level-0"></span>';
             }).join('') + '</span>';
         }
 
         return '<span class="heatmap">' + bins.map(function (b) {
-            var intensity = b.count / maxCount;
+            var count = Number(b.count || 0);
+            var intensity = count / maxCount;
             var level = Math.max(1, Math.min(5, Math.ceil(intensity * 5)));
-            return '<span class="heatmap-bin heatmap-level-' + level + '" title="' + (b.bin_start * 100) + '-' + (b.bin_end * 100) + '%: ' + b.count + '"></span>';
+            var tooltip = buildHeatmapTooltip(stem, b, count, totalCount, duration);
+            return '<span class="heatmap-bin heatmap-level-' + level + '" data-tooltip="' + escapeAttr(tooltip) + '" aria-label="' + escapeAttr(tooltip) + '"></span>';
         }).join('') + '</span>';
+    }
+
+    function buildHeatmapTooltip(stem, bin, count, totalCount, durationSeconds) {
+        var meta = trackMetaByStem[stem] || {};
+        var title = meta.title || stem;
+        var startPct = Math.round(Number(bin.bin_start || 0) * 100);
+        var endPct = Math.round(Number(bin.bin_end || 0) * 100);
+
+        var rangeLabel;
+        if (durationSeconds > 0) {
+            var startSec = Number(bin.bin_start || 0) * durationSeconds;
+            var endSec = Number(bin.bin_end || 0) * durationSeconds;
+            rangeLabel = 'Range: ' + formatDuration(startSec) + ' - ' + formatDuration(endSec) + ' (' + startPct + '%-' + endPct + '%)';
+        } else {
+            rangeLabel = 'Range: ' + startPct + '%-' + endPct + '% of track';
+        }
+
+        var share = totalCount > 0 ? Math.round((count / totalCount) * 100) : 0;
+        var countLabel = 'Dropouts: ' + count + (totalCount > 0 ? ' (' + share + '% of track dropouts)' : '');
+
+        return title + '\n' + rangeLabel + '\n' + countLabel;
     }
 
     function renderSessions(sessions) {
@@ -506,17 +929,50 @@
             tr.innerHTML =
                 '<td>' + escapeHtml(s.started_at) + '</td>' +
                 '<td>' + escapeHtml(s.last_seen_at) + '</td>' +
-                '<td>' + s.tracks_heard + '</td>' +
+                '<td>' + Number(s.tracks_heard || 0) + '</td>' +
                 '<td><code>' + escapeHtml(s.ip_hash || '') + '</code></td>';
             tbody.appendChild(tr);
         });
     }
 
+    function formatDuration(secondsRaw) {
+        var total = Math.max(0, Math.round(Number(secondsRaw) || 0));
+        var hours = Math.floor(total / 3600);
+        var minutes = Math.floor((total % 3600) / 60);
+        var seconds = total % 60;
+
+        if (hours > 0) {
+            return hours + ':' + pad2(minutes) + ':' + pad2(seconds);
+        }
+        return minutes + ':' + pad2(seconds);
+    }
+
+    function pad2(n) {
+        n = Number(n) || 0;
+        return n < 10 ? '0' + n : String(n);
+    }
+
+    function formatDateTime(value) {
+        if (!value) return '';
+        var parsed = new Date(value);
+        if (isNaN(parsed.getTime())) {
+            return String(value);
+        }
+        return parsed.toLocaleString();
+    }
+
     function escapeHtml(s) {
-        if (!s) return '';
+        if (s === null || s === undefined) return '';
         var div = document.createElement('div');
-        div.textContent = s;
+        div.textContent = String(s);
         return div.innerHTML;
+    }
+
+    function escapeAttr(s) {
+        return escapeHtml(s)
+            .replace(/"/g, '&quot;')
+            .replace(/'/g, '&#39;')
+            .replace(/\n/g, '&#10;');
     }
 
     document.addEventListener('DOMContentLoaded', init);

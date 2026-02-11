@@ -10,6 +10,7 @@
     <!-- Login -->
     <div id="admin-login" class="panel">
         <h1>Acetate Admin</h1>
+        <p class="panel-copy">Manage listening-room access, track metadata, and analytics.</p>
         <form id="login-form">
             <input type="text" id="admin-username" placeholder="Username" autocomplete="username">
             <input type="password" id="admin-password" placeholder="Password" autocomplete="current-password">
@@ -58,7 +59,7 @@
                     <span id="cfg-admin-user"></span>
                 </div>
                 <div class="config-item">
-                    <label>Password</label>
+                    <label>Listening Password</label>
                     <span id="cfg-password"></span>
                 </div>
                 <div class="config-item">
@@ -70,7 +71,8 @@
 
         <!-- Password Section -->
         <section id="section-password" class="section">
-            <h2>Update Password</h2>
+            <h2>Update Listening Password</h2>
+            <p class="section-copy">This controls listener access to the listening room gate.</p>
             <form id="password-form" class="inline-form">
                 <input type="password" id="new-password" placeholder="New passphrase">
                 <button type="submit">Update</button>
@@ -87,6 +89,23 @@
                 <button type="submit">Update</button>
             </form>
             <div id="admin-password-status" class="status hidden"></div>
+        </section>
+
+        <!-- Admin Users Section -->
+        <section id="section-admin-users" class="section">
+            <h2>Admin Users</h2>
+            <p class="section-copy">Add or update administrators. The original admin account cannot be deactivated.</p>
+            <form id="admin-user-create-form" class="inline-form">
+                <input type="text" id="new-admin-username" placeholder="Username" autocomplete="off">
+                <input type="password" id="new-admin-user-password" placeholder="Temporary password" autocomplete="new-password">
+                <label class="checkbox-label">
+                    <input type="checkbox" id="new-admin-force-reset" checked>
+                    Force reset on first login
+                </label>
+                <button type="submit">Create Admin</button>
+            </form>
+            <div id="admin-users-status" class="status hidden"></div>
+            <div id="admin-users-list"></div>
         </section>
 
         <!-- Cover Section -->

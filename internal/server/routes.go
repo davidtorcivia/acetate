@@ -18,7 +18,6 @@ import (
 	"time"
 
 	"github.com/go-chi/chi/v5"
-	"golang.org/x/crypto/bcrypt"
 
 	acetate "acetate"
 	"acetate/internal/album"
@@ -483,20 +482,14 @@ func (s *Server) handleAdminUpdatePassword(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
-	if strings.TrimSpace(req.Passphrase) == "" {
+	passphrase := strings.TrimSpace(req.Passphrase)
+	if passphrase == "" {
 		jsonError(w, "passphrase cannot be empty", http.StatusBadRequest)
 		return
 	}
 
-	hash, err := bcrypt.GenerateFromPassword([]byte(req.Passphrase), bcrypt.DefaultCost)
-	if err != nil {
-		log.Printf("hash passphrase error: %v", err)
-		jsonError(w, "internal error", http.StatusInternalServerError)
-		return
-	}
-
 	cfg := s.config.Get()
-	cfg.Password = string(hash)
+	cfg.Password = passphrase
 	if err := s.config.Update(cfg); err != nil {
 		log.Printf("update config error: %v", err)
 		jsonError(w, "internal error", http.StatusInternalServerError)
@@ -613,15 +606,6 @@ func (s *Server) handleAdminGetConfig(w http.ResponseWriter, r *http.Request) {
 			passwordResetRequired = identity.RequirePasswordReset
 		}
 	}
-	// Truncate password hash for display
-	passDisplay := ""
-	if cfg.Password != "" {
-		if len(cfg.Password) > 20 {
-			passDisplay = cfg.Password[:20] + "..."
-		} else {
-			passDisplay = cfg.Password
-		}
-	}
 
 	jsonOK(w, map[string]interface{}{
 		"title":                   cfg.Title,
@@ -629,7 +613,7 @@ func (s *Server) handleAdminGetConfig(w http.ResponseWriter, r *http.Request) {
 		"admin_user":              adminUsername,
 		"password_reset_required": passwordResetRequired,
 		"password_set":            cfg.Password != "",
-		"password_hash":           passDisplay,
+		"password":                cfg.Password,
 		"track_count":             len(cfg.Tracks),
 	})
 }
