@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"log"
 	"os"
 	"os/signal"
@@ -44,7 +45,12 @@ func main() {
 	defer db.Close()
 
 	if err := server.EnsureAdminBootstrap(db, adminUsername, adminPassword, adminPasswordHash); err != nil {
-		log.Fatalf("bootstrap admin user: %v", err)
+		if errors.Is(err, server.ErrAdminBootstrapMissing) {
+			log.Println("WARNING: no bootstrap admin credentials provided and no admin users exist")
+			log.Println("WARNING: open /admin and complete first-time setup to create the initial admin account")
+		} else {
+			log.Fatalf("bootstrap admin user: %v", err)
+		}
 	}
 
 	// Load or generate config

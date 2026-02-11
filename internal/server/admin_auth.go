@@ -20,12 +20,17 @@ const (
 )
 
 var (
-	adminUsernameRe          = regexp.MustCompile(`^[a-z0-9._-]+$`)
-	dummyAdminPasswordHash   = "$2a$10$7EqJtq98hPqEX7fNZaFWo.O9JmMbiY4rQ6hJ7PV5K56ZtPcNI0fS"
-	errAdminInvalidCreds     = errors.New("invalid admin credentials")
-	errAdminWeakPassword     = errors.New("weak admin password")
-	errAdminBootstrapMissing = errors.New("admin bootstrap credentials not configured")
+	adminUsernameRe           = regexp.MustCompile(`^[a-z0-9._-]+$`)
+	dummyAdminPasswordHash    = "$2a$10$7EqJtq98hPqEX7fNZaFWo.O9JmMbiY4rQ6hJ7PV5K56ZtPcNI0fS"
+	errAdminInvalidCreds      = errors.New("invalid admin credentials")
+	errAdminWeakPassword      = errors.New("weak admin password")
+	errAdminBootstrapMissing  = errors.New("admin bootstrap credentials not configured")
+	errAdminAlreadyConfigured = errors.New("admin already configured")
 )
+
+// ErrAdminBootstrapMissing indicates startup bootstrap credentials were not provided
+// while the admin_users table is empty.
+var ErrAdminBootstrapMissing = errAdminBootstrapMissing
 
 type adminUserRecord struct {
 	ID           int64
@@ -35,9 +40,9 @@ type adminUserRecord struct {
 
 // EnsureAdminBootstrap creates the first admin account when the database has no admin users.
 func EnsureAdminBootstrap(db *sql.DB, username, password, passwordHash string) error {
-	var count int
-	if err := db.QueryRow("SELECT COUNT(*) FROM admin_users").Scan(&count); err != nil {
-		return fmt.Errorf("count admin users: %w", err)
+	count, err := adminUserCount(db)
+	if err != nil {
+		return err
 	}
 	if count > 0 {
 		return nil
@@ -92,6 +97,14 @@ func resolveAdminPasswordHash(password, passwordHash string) (string, error) {
 		return "", err
 	}
 	return string(out), nil
+}
+
+func adminUserCount(db *sql.DB) (int, error) {
+	var count int
+	if err := db.QueryRow("SELECT COUNT(*) FROM admin_users").Scan(&count); err != nil {
+		return 0, fmt.Errorf("count admin users: %w", err)
+	}
+	return count, nil
 }
 
 func normalizeAdminUsername(username string) (string, error) {
@@ -214,4 +227,57 @@ func (s *Server) getAdminUsernameByID(userID int64) (string, error) {
 		return "", err
 	}
 	return username, nil
+}
+
+func (s *Server) needsAdminSetup() (bool, error) {
+	count, err := adminUserCount(s.db)
+	if err != nil {
+		return false, err
+	}
+	return count == 0, nil
+}
+
+func (s *Server) createInitialAdminUser(username, password string) (adminUserRecord, error) {
+	user := adminUserRecord{}
+
+	needsSetup, err := s.needsAdminSetup()
+	if err != nil {
+		return user, err
+	}
+	if !needsSetup {
+		return user, errAdminAlreadyConfigured
+	}
+
+	normalizedUsername, err := normalizeAdminUsername(username)
+	if err != nil {
+		return user, err
+	}
+	if err := validateAdminPassword(password); err != nil {
+		return user, err
+	}
+
+	hash, err := bcrypt.GenerateFromPassword([]byte(strings.TrimSpace(password)), bcrypt.DefaultCost)
+	if err != nil {
+		return user, fmt.Errorf("hash bootstrap admin password: %w", err)
+	}
+
+	now := time.Now().UTC()
+	res, err := s.db.Exec(
+		"INSERT INTO admin_users (username, password_hash, is_active, created_at, updated_at, last_login_at) VALUES (?, ?, 1, ?, ?, ?)",
+		normalizedUsername, string(hash), now, now, now,
+	)
+	if err != nil {
+		return user, fmt.Errorf("create bootstrap admin user: %w", err)
+	}
+
+	id, err := res.LastInsertId()
+	if err != nil {
+		return user, fmt.Errorf("bootstrap admin user id: %w", err)
+	}
+
+	user = adminUserRecord{
+		ID:       id,
+		Username: normalizedUsername,
+	}
+	return user, nil
 }

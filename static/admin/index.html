@@ -18,6 +18,19 @@
         <div id="login-error" class="error hidden"></div>
     </div>
 
+    <!-- First-time setup -->
+    <div id="admin-setup" class="panel hidden">
+        <h1>Acetate Setup</h1>
+        <p class="setup-copy">Create the first admin account.</p>
+        <form id="setup-form">
+            <input type="text" id="setup-username" placeholder="Admin username" autocomplete="username">
+            <input type="password" id="setup-password" placeholder="Admin password" autocomplete="new-password">
+            <input type="password" id="setup-password-confirm" placeholder="Confirm admin password" autocomplete="new-password">
+            <button type="submit">Create Admin Account</button>
+        </form>
+        <div id="setup-error" class="error hidden"></div>
+    </div>
+
     <!-- Dashboard -->
     <div id="admin-dashboard" class="hidden">
         <header>

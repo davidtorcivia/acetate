@@ -2,25 +2,45 @@
 (function () {
     'use strict';
 
-    var loginPanel, dashboard, loginForm, usernameInput, passwordInput, loginError;
+    var loginPanel, setupPanel, dashboard, loginForm, setupForm, usernameInput, passwordInput, loginError;
 
     function init() {
         loginPanel = document.getElementById('admin-login');
+        setupPanel = document.getElementById('admin-setup');
         dashboard = document.getElementById('admin-dashboard');
         loginForm = document.getElementById('login-form');
+        setupForm = document.getElementById('setup-form');
         usernameInput = document.getElementById('admin-username');
         passwordInput = document.getElementById('admin-password');
         loginError = document.getElementById('login-error');
 
         loginForm.addEventListener('submit', handleLogin);
+        setupForm.addEventListener('submit', handleSetup);
         document.getElementById('btn-logout').addEventListener('click', handleLogout);
         document.getElementById('password-form').addEventListener('submit', handlePasswordUpdate);
         document.getElementById('admin-password-form').addEventListener('submit', handleAdminPasswordUpdate);
         document.getElementById('cover-form').addEventListener('submit', handleCoverUpload);
         document.getElementById('btn-save-tracks').addEventListener('click', handleSaveTracks);
 
-        // Check existing session
-        checkSession();
+        checkSetupStatus();
+    }
+
+    function checkSetupStatus() {
+        fetch('/admin/api/setup/status', { credentials: 'same-origin' })
+            .then(function (r) {
+                if (!r.ok) throw new Error('status');
+                return r.json();
+            })
+            .then(function (data) {
+                if (data && data.needs_setup) {
+                    showSetup();
+                } else {
+                    checkSession();
+                }
+            })
+            .catch(function () {
+                showLogin();
+            });
     }
 
     function checkSession() {
@@ -33,6 +53,47 @@
                 }
             })
             .catch(function () { showLogin(); });
+    }
+
+    function handleSetup(e) {
+        e.preventDefault();
+        var username = document.getElementById('setup-username').value.trim();
+        var password = document.getElementById('setup-password').value;
+        var confirm = document.getElementById('setup-password-confirm').value;
+        var setupError = document.getElementById('setup-error');
+
+        if (!username || !password || !confirm) return;
+        setupError.classList.add('hidden');
+
+        if (password !== confirm) {
+            setupError.textContent = 'Passwords do not match';
+            setupError.classList.remove('hidden');
+            return;
+        }
+
+        fetch('/admin/api/setup', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            credentials: 'same-origin',
+            body: JSON.stringify({ username: username, password: password })
+        })
+            .then(function (r) {
+                if (r.ok) {
+                    showDashboard();
+                } else if (r.status === 409) {
+                    checkSession();
+                } else if (r.status === 400) {
+                    setupError.textContent = 'Invalid username or password policy not met';
+                    setupError.classList.remove('hidden');
+                } else {
+                    setupError.textContent = 'Setup failed';
+                    setupError.classList.remove('hidden');
+                }
+            })
+            .catch(function () {
+                setupError.textContent = 'Connection error';
+                setupError.classList.remove('hidden');
+            });
     }
 
     function handleLogin(e) {
@@ -67,18 +128,27 @@
         fetch('/admin/api/auth', {
             method: 'DELETE',
             credentials: 'same-origin'
-        }).then(function () { showLogin(); });
+        }).then(function () { checkSetupStatus(); });
     }
 
     function showLogin() {
         loginPanel.classList.remove('hidden');
+        setupPanel.classList.add('hidden');
         dashboard.classList.add('hidden');
         usernameInput.value = '';
         passwordInput.value = '';
         usernameInput.focus();
     }
 
+    function showSetup() {
+        setupPanel.classList.remove('hidden');
+        loginPanel.classList.add('hidden');
+        dashboard.classList.add('hidden');
+        document.getElementById('setup-username').focus();
+    }
+
     function showDashboard() {
+        setupPanel.classList.add('hidden');
         loginPanel.classList.add('hidden');
         dashboard.classList.remove('hidden');
         loadConfig();

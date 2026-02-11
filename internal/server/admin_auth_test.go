@@ -1,6 +1,7 @@
 package server
 
 import (
+	"errors"
 	"testing"
 
 	"acetate/internal/database"
@@ -37,5 +38,7 @@ func TestEnsureAdminBootstrapRequiresCredentials(t *testing.T) {
 
 	if err := EnsureAdminBootstrap(db, "admin", "", ""); err == nil {
 		t.Fatal("expected bootstrap credential error")
+	} else if !errors.Is(err, ErrAdminBootstrapMissing) {
+		t.Fatalf("expected ErrAdminBootstrapMissing, got %v", err)
 	}
 }

@@ -54,8 +54,10 @@ func setupTestWithBootstrap(t *testing.T, username, password, passwordHash strin
 	}
 	t.Cleanup(func() { db.Close() })
 
-	if err := EnsureAdminBootstrap(db, username, password, passwordHash); err != nil {
-		t.Fatalf("bootstrap admin user: %v", err)
+	if strings.TrimSpace(username) != "" || strings.TrimSpace(password) != "" || strings.TrimSpace(passwordHash) != "" {
+		if err := EnsureAdminBootstrap(db, username, password, passwordHash); err != nil {
+			t.Fatalf("bootstrap admin user: %v", err)
+		}
 	}
 
 	// Create config with a password
@@ -373,6 +375,88 @@ func TestAdminAuth(t *testing.T) {
 	}
 	if !found {
 		t.Error("no admin session cookie set")
+	}
+}
+
+func TestAdminSetupFlowWhenNoAdminUsers(t *testing.T) {
+	env := setupTestWithBootstrap(t, "", "", "")
+
+	statusResp, err := env.ts.Client().Get(env.ts.URL + "/admin/api/setup/status")
+	if err != nil {
+		t.Fatalf("setup status request: %v", err)
+	}
+	defer statusResp.Body.Close()
+	if statusResp.StatusCode != http.StatusOK {
+		t.Fatalf("setup status = %d, want 200", statusResp.StatusCode)
+	}
+
+	var statusPayload struct {
+		NeedsSetup bool `json:"needs_setup"`
+	}
+	if err := json.NewDecoder(statusResp.Body).Decode(&statusPayload); err != nil {
+		t.Fatalf("decode setup status: %v", err)
+	}
+	if !statusPayload.NeedsSetup {
+		t.Fatal("expected needs_setup=true")
+	}
+
+	body, _ := json.Marshal(map[string]string{
+		"username": "firstadmin",
+		"password": "first-admin-pass-123",
+	})
+	req, _ := http.NewRequest(http.MethodPost, env.ts.URL+"/admin/api/setup", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Origin", env.ts.URL)
+	resp, err := env.ts.Client().Do(req)
+	if err != nil {
+		t.Fatalf("setup request: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusCreated {
+		t.Fatalf("setup status = %d, want 201", resp.StatusCode)
+	}
+
+	foundCookie := false
+	for _, c := range resp.Cookies() {
+		if c.Name == "acetate_admin" && c.Value != "" {
+			foundCookie = true
+			break
+		}
+	}
+	if !foundCookie {
+		t.Fatal("expected admin session cookie after setup")
+	}
+
+	statusResp2, err := env.ts.Client().Get(env.ts.URL + "/admin/api/setup/status")
+	if err != nil {
+		t.Fatalf("setup status request after create: %v", err)
+	}
+	defer statusResp2.Body.Close()
+	if err := json.NewDecoder(statusResp2.Body).Decode(&statusPayload); err != nil {
+		t.Fatalf("decode setup status after create: %v", err)
+	}
+	if statusPayload.NeedsSetup {
+		t.Fatal("expected needs_setup=false after first admin creation")
+	}
+}
+
+func TestAdminSetupRejectedWhenAlreadyConfigured(t *testing.T) {
+	env := setupTest(t)
+
+	body, _ := json.Marshal(map[string]string{
+		"username": "newadmin",
+		"password": "another-admin-pass-123",
+	})
+	req, _ := http.NewRequest(http.MethodPost, env.ts.URL+"/admin/api/setup", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Origin", env.ts.URL)
+	resp, err := env.ts.Client().Do(req)
+	if err != nil {
+		t.Fatalf("setup request: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusConflict {
+		t.Fatalf("status = %d, want 409", resp.StatusCode)
 	}
 }
 

@@ -57,6 +57,8 @@ func (s *Server) routes() http.Handler {
 	// Admin routes
 	r.Route("/admin", func(r chi.Router) {
 		r.With(bodyLimiter(1024)).Post("/api/auth", s.handleAdminAuth)
+		r.Get("/api/setup/status", s.handleAdminSetupStatus)
+		r.With(bodyLimiter(4096)).Post("/api/setup", s.handleAdminSetupBootstrap)
 
 		r.Group(func(r chi.Router) {
 			r.Use(s.requireAdmin)

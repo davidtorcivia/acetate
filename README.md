@@ -131,7 +131,7 @@ Set env vars before first startup:
 ADMIN_USERNAME=admin ADMIN_PASSWORD_HASH='$2a$10$...' go run ./cmd/server
 ```
 
-If the database has no admin users and no bootstrap credentials are provided, startup fails.
+If you skip bootstrap env vars, the server still starts and `/admin` shows a one-time UI setup form to create the first admin account.
 
 ## Docker
 
@@ -316,6 +316,7 @@ Back up `data/`:
 - `album path does not exist`: check `ALBUM_PATH` or wizard path.
 - Login always fails: verify `config.json.password` is a bcrypt hash, not plaintext.
 - Admin login fails on first boot: ensure `ADMIN_USERNAME` + `ADMIN_PASSWORD_HASH` (or `ADMIN_PASSWORD`) are set.
+- If no admin exists yet, open `/admin` and complete the first-time setup form.
 - No tracks shown: confirm `.mp3` files exist at album root and track stems match config.
 - Cover upload rejected: use valid JPEG/PNG with reasonable dimensions.
 - Rate limited on auth: wait for the limiter window to reset.

@@ -39,6 +39,11 @@ header {
     margin-top: 16px;
 }
 
+.setup-copy {
+    color: #aaa;
+    font-size: 0.9rem;
+}
+
 /* Forms & Inputs */
 input[type="text"],
 input[type="password"] {
