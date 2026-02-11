@@ -63,7 +63,7 @@ The wizard will:
 - generate/load `data/config.json`,
 - let you set title/artist,
 - hash and store listener passphrase,
-- optionally generate/set admin token,
+- configure bootstrap admin username/password (bcrypt-hashed),
 - write `.env` with runtime values.
 
 ### 3) Start the server
@@ -92,7 +92,8 @@ Prompts:
 - listen address (default `:8080`)
 - album title and artist
 - listener passphrase (bcrypt-hashed before saving)
-- admin token mode (generate or input)
+- admin username
+- admin password (bcrypt-hashed before writing `.env`)
 
 Outputs:
 
@@ -101,8 +102,8 @@ Outputs:
 
 Notes:
 
-- If you disable admin in the wizard, `ADMIN_TOKEN` is removed from `.env`.
-- You can rerun the wizard safely to update metadata/tokens.
+- Wizard output stores `ADMIN_PASSWORD_HASH`, not plaintext admin passwords.
+- You can rerun the wizard safely to update metadata and credentials.
 
 ## Manual Setup (Without Wizard)
 
@@ -122,15 +123,15 @@ go run ./cmd/hashpass "your passphrase"
 
 Paste the output hash into `data/config.json` under `"password"`.
 
-### 3) Set admin token
+### 3) Set bootstrap admin credentials
 
-Set env var before startup:
+Set env vars before first startup:
 
 ```bash
-ADMIN_TOKEN=your-admin-token go run ./cmd/server
+ADMIN_USERNAME=admin ADMIN_PASSWORD_HASH='$2a$10$...' go run ./cmd/server
 ```
 
-If `ADMIN_TOKEN` is missing, `/admin` auth is disabled.
+If the database has no admin users and no bootstrap credentials are provided, startup fails.
 
 ## Docker
 
@@ -159,7 +160,8 @@ Expose:
 
 Environment in `docker-compose.yml`:
 
-- `ADMIN_TOKEN=${ADMIN_TOKEN}`
+- `ADMIN_USERNAME=${ADMIN_USERNAME}`
+- `ADMIN_PASSWORD_HASH=${ADMIN_PASSWORD_HASH}`
 - `LISTEN_ADDR=:8080`
 - `ALBUM_PATH=/album`
 - `DATA_PATH=/data`
@@ -167,7 +169,8 @@ Environment in `docker-compose.yml`:
 Create a local `.env` with at least:
 
 ```env
-ADMIN_TOKEN=replace-with-strong-token
+ADMIN_USERNAME=admin
+ADMIN_PASSWORD_HASH=$2a$10$replace-with-bcrypt-hash
 ```
 
 ## Configuration Reference
@@ -179,7 +182,9 @@ ADMIN_TOKEN=replace-with-strong-token
 | `LISTEN_ADDR` | `:8080` | HTTP bind address |
 | `ALBUM_PATH` | `./album` | Album media directory |
 | `DATA_PATH` | `./data` | Writable state directory |
-| `ADMIN_TOKEN` | empty | Enables admin auth when set |
+| `ADMIN_USERNAME` | `admin` | Bootstrap username when `admin_users` is empty |
+| `ADMIN_PASSWORD_HASH` | empty | Bootstrap bcrypt hash when `admin_users` is empty |
+| `ADMIN_PASSWORD` | empty | Bootstrap plaintext password alternative (hashed on startup; avoid in prod) |
 
 ### `data/config.json`
 
@@ -224,12 +229,21 @@ Admin endpoints:
 - `GET /admin/api/tracks`
 - `PUT /admin/api/tracks`
 - `PUT /admin/api/password`
+- `PUT /admin/api/admin-password`
 - `POST /admin/api/cover`
 - `GET /admin/api/analytics`
+- `GET /admin/api/reconcile`
+- `POST /admin/api/reconcile`
+- `GET /admin/api/ops/health`
+- `GET /admin/api/ops/stats`
+- `POST /admin/api/ops/maintenance`
+- `GET /admin/api/export/events`
+- `GET /admin/api/export/backup`
 
 ## Security Model
 
 - Listener and admin auth use separate HttpOnly cookies.
+- Admin auth uses DB-backed `admin_users` with bcrypt password hashes.
 - Passphrase is verified with bcrypt hash from config.
 - Session IDs are cryptographically random and server-stored.
 - Session expiry:
@@ -301,7 +315,7 @@ Back up `data/`:
 
 - `album path does not exist`: check `ALBUM_PATH` or wizard path.
 - Login always fails: verify `config.json.password` is a bcrypt hash, not plaintext.
-- Admin login fails: ensure `ADMIN_TOKEN` at runtime matches what you enter.
+- Admin login fails on first boot: ensure `ADMIN_USERNAME` + `ADMIN_PASSWORD_HASH` (or `ADMIN_PASSWORD`) are set.
 - No tracks shown: confirm `.mp3` files exist at album root and track stems match config.
 - Cover upload rejected: use valid JPEG/PNG with reasonable dimensions.
 - Rate limited on auth: wait for the limiter window to reset.

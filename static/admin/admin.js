@@ -2,18 +2,20 @@
 (function () {
     'use strict';
 
-    var loginPanel, dashboard, loginForm, tokenInput, loginError;
+    var loginPanel, dashboard, loginForm, usernameInput, passwordInput, loginError;
 
     function init() {
         loginPanel = document.getElementById('admin-login');
         dashboard = document.getElementById('admin-dashboard');
         loginForm = document.getElementById('login-form');
-        tokenInput = document.getElementById('admin-token');
+        usernameInput = document.getElementById('admin-username');
+        passwordInput = document.getElementById('admin-password');
         loginError = document.getElementById('login-error');
 
         loginForm.addEventListener('submit', handleLogin);
         document.getElementById('btn-logout').addEventListener('click', handleLogout);
         document.getElementById('password-form').addEventListener('submit', handlePasswordUpdate);
+        document.getElementById('admin-password-form').addEventListener('submit', handleAdminPasswordUpdate);
         document.getElementById('cover-form').addEventListener('submit', handleCoverUpload);
         document.getElementById('btn-save-tracks').addEventListener('click', handleSaveTracks);
 
@@ -35,8 +37,9 @@
 
     function handleLogin(e) {
         e.preventDefault();
-        var token = tokenInput.value.trim();
-        if (!token) return;
+        var username = usernameInput.value.trim();
+        var password = passwordInput.value;
+        if (!username || !password) return;
 
         loginError.classList.add('hidden');
 
@@ -44,13 +47,13 @@
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             credentials: 'same-origin',
-            body: JSON.stringify({ token: token })
+            body: JSON.stringify({ username: username, password: password })
         })
             .then(function (r) {
                 if (r.ok) {
                     showDashboard();
                 } else {
-                    loginError.textContent = 'Invalid token';
+                    loginError.textContent = 'Invalid credentials';
                     loginError.classList.remove('hidden');
                 }
             })
@@ -70,8 +73,9 @@
     function showLogin() {
         loginPanel.classList.remove('hidden');
         dashboard.classList.add('hidden');
-        tokenInput.value = '';
-        tokenInput.focus();
+        usernameInput.value = '';
+        passwordInput.value = '';
+        usernameInput.focus();
     }
 
     function showDashboard() {
@@ -89,6 +93,7 @@
             .then(function (data) {
                 document.getElementById('cfg-title').textContent = data.title || '(not set)';
                 document.getElementById('cfg-artist').textContent = data.artist || '(not set)';
+                document.getElementById('cfg-admin-user').textContent = data.admin_user || '(unknown)';
                 document.getElementById('cfg-password').textContent = data.password_set
                     ? data.password_hash
                     : '(not set)';
@@ -119,6 +124,38 @@
                     loadConfig();
                 } else {
                     status.textContent = 'Failed to update';
+                    status.className = 'status error';
+                }
+            });
+    }
+
+    function handleAdminPasswordUpdate(e) {
+        e.preventDefault();
+        var currentPass = document.getElementById('current-admin-password').value;
+        var newPass = document.getElementById('new-admin-password').value;
+        var status = document.getElementById('admin-password-status');
+
+        if (!currentPass || !newPass) return;
+
+        fetch('/admin/api/admin-password', {
+            method: 'PUT',
+            headers: { 'Content-Type': 'application/json' },
+            credentials: 'same-origin',
+            body: JSON.stringify({
+                current_password: currentPass,
+                new_password: newPass
+            })
+        })
+            .then(function (r) {
+                status.classList.remove('hidden');
+                if (r.ok) {
+                    status.textContent = 'Admin password updated. Please log in again.';
+                    status.className = 'status success';
+                    document.getElementById('current-admin-password').value = '';
+                    document.getElementById('new-admin-password').value = '';
+                    setTimeout(showLogin, 500);
+                } else {
+                    status.textContent = 'Failed to update admin password';
                     status.className = 'status error';
                 }
             });

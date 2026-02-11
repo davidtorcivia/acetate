@@ -117,11 +117,15 @@ func (s *SessionStore) DeleteSession(id string) error {
 
 // CreateAdminSession generates a new admin session.
 func (s *SessionStore) CreateAdminSession() (string, error) {
-	return s.CreateAdminSessionWithContext("", "")
+	return s.CreateAdminSessionWithContext(0, "", "")
 }
 
 // CreateAdminSessionWithContext generates a new admin session bound to coarse client fingerprints.
-func (s *SessionStore) CreateAdminSessionWithContext(ip, userAgent string) (string, error) {
+func (s *SessionStore) CreateAdminSessionWithContext(userID int64, ip, userAgent string) (string, error) {
+	if userID <= 0 {
+		return "", fmt.Errorf("create admin session: invalid user id")
+	}
+
 	id, err := generateSessionID()
 	if err != nil {
 		return "", err
@@ -132,8 +136,8 @@ func (s *SessionStore) CreateAdminSessionWithContext(ip, userAgent string) (stri
 	uaHash := hashIP(strings.TrimSpace(userAgent), s.salt)
 
 	_, err = s.db.Exec(
-		"INSERT INTO admin_sessions (id, created_at, last_seen_at, ip_hash, user_agent_hash) VALUES (?, ?, ?, ?, ?)",
-		id, now, now, ipHash, uaHash,
+		"INSERT INTO admin_sessions (id, created_at, last_seen_at, ip_hash, user_agent_hash, user_id) VALUES (?, ?, ?, ?, ?, ?)",
+		id, now, now, ipHash, uaHash, userID,
 	)
 	if err != nil {
 		return "", fmt.Errorf("create admin session: %w", err)
@@ -144,37 +148,46 @@ func (s *SessionStore) CreateAdminSessionWithContext(ip, userAgent string) (stri
 
 // ValidateAdminSession checks if an admin session is valid (1 hour, no sliding).
 func (s *SessionStore) ValidateAdminSession(id string) (bool, error) {
-	return s.ValidateAdminSessionWithContext(id, "", "")
+	valid, _, err := s.ValidateAdminSessionWithContext(id, "", "")
+	return valid, err
 }
 
 // ValidateAdminSessionWithContext checks if an admin session is valid and optionally verifies client fingerprints.
-func (s *SessionStore) ValidateAdminSessionWithContext(id, ip, userAgent string) (bool, error) {
+func (s *SessionStore) ValidateAdminSessionWithContext(id, ip, userAgent string) (bool, int64, error) {
 	var createdAt time.Time
 	var lastSeenAt sql.NullTime
 	var storedIPHash sql.NullString
 	var storedUAHash sql.NullString
+	var userID sql.NullInt64
+	var isActive sql.NullInt64
 	err := s.db.QueryRow(
-		"SELECT created_at, last_seen_at, ip_hash, user_agent_hash FROM admin_sessions WHERE id = ?", id,
-	).Scan(&createdAt, &lastSeenAt, &storedIPHash, &storedUAHash)
+		"SELECT s.created_at, s.last_seen_at, s.ip_hash, s.user_agent_hash, s.user_id, u.is_active FROM admin_sessions s LEFT JOIN admin_users u ON s.user_id = u.id WHERE s.id = ?",
+		id,
+	).Scan(&createdAt, &lastSeenAt, &storedIPHash, &storedUAHash, &userID, &isActive)
 	if err == sql.ErrNoRows {
-		return false, nil
+		return false, 0, nil
 	}
 	if err != nil {
-		return false, fmt.Errorf("query admin session: %w", err)
+		return false, 0, fmt.Errorf("query admin session: %w", err)
+	}
+
+	if !userID.Valid || userID.Int64 <= 0 || !isActive.Valid || isActive.Int64 != 1 {
+		_, _ = s.db.Exec("DELETE FROM admin_sessions WHERE id = ?", id)
+		return false, 0, nil
 	}
 
 	if time.Since(createdAt) > AdminSessionExpiry {
 		if _, err := s.db.Exec("DELETE FROM admin_sessions WHERE id = ?", id); err != nil {
-			return false, fmt.Errorf("delete expired admin session: %w", err)
+			return false, 0, fmt.Errorf("delete expired admin session: %w", err)
 		}
-		return false, nil
+		return false, 0, nil
 	}
 
 	if strings.TrimSpace(ip) != "" && storedIPHash.Valid && storedIPHash.String != "" {
 		reqIPHash := hashIP(strings.TrimSpace(ip), s.salt)
 		if !secureHashEqual(storedIPHash.String, reqIPHash) {
 			_, _ = s.db.Exec("DELETE FROM admin_sessions WHERE id = ?", id)
-			return false, nil
+			return false, 0, nil
 		}
 	}
 
@@ -182,22 +195,31 @@ func (s *SessionStore) ValidateAdminSessionWithContext(id, ip, userAgent string)
 		reqUAHash := hashIP(strings.TrimSpace(userAgent), s.salt)
 		if !secureHashEqual(storedUAHash.String, reqUAHash) {
 			_, _ = s.db.Exec("DELETE FROM admin_sessions WHERE id = ?", id)
-			return false, nil
+			return false, 0, nil
 		}
 	}
 
 	if !lastSeenAt.Valid || time.Since(lastSeenAt.Time.UTC()) >= AdminTouchWindow {
 		if _, err := s.db.Exec("UPDATE admin_sessions SET last_seen_at = ? WHERE id = ?", time.Now().UTC(), id); err != nil {
-			return false, fmt.Errorf("touch admin session: %w", err)
+			return false, 0, fmt.Errorf("touch admin session: %w", err)
 		}
 	}
 
-	return true, nil
+	return true, userID.Int64, nil
 }
 
 // DeleteAdminSession removes an admin session.
 func (s *SessionStore) DeleteAdminSession(id string) error {
 	_, err := s.db.Exec("DELETE FROM admin_sessions WHERE id = ?", id)
+	return err
+}
+
+// DeleteAdminSessionsForUser revokes all sessions for a specific admin user.
+func (s *SessionStore) DeleteAdminSessionsForUser(userID int64) error {
+	if userID <= 0 {
+		return nil
+	}
+	_, err := s.db.Exec("DELETE FROM admin_sessions WHERE user_id = ?", userID)
 	return err
 }
 

@@ -23,6 +23,27 @@ func testDB(t *testing.T) *SessionStore {
 	return store
 }
 
+func seedAdminUser(t *testing.T, store *SessionStore) int64 {
+	t.Helper()
+
+	hash, err := bcrypt.GenerateFromPassword([]byte("admin-pass-123"), bcrypt.MinCost)
+	if err != nil {
+		t.Fatalf("generate admin hash: %v", err)
+	}
+	res, err := store.db.Exec(
+		"INSERT INTO admin_users (username, password_hash, is_active, created_at, updated_at) VALUES (?, ?, 1, datetime('now'), datetime('now'))",
+		"admin", string(hash),
+	)
+	if err != nil {
+		t.Fatalf("insert admin user: %v", err)
+	}
+	id, err := res.LastInsertId()
+	if err != nil {
+		t.Fatalf("admin user id: %v", err)
+	}
+	return id
+}
+
 func TestCreateAndValidateSession(t *testing.T) {
 	store := testDB(t)
 
@@ -75,10 +96,11 @@ func TestInvalidSession(t *testing.T) {
 
 func TestAdminSession(t *testing.T) {
 	store := testDB(t)
+	adminUserID := seedAdminUser(t, store)
 
-	id, err := store.CreateAdminSession()
+	id, err := store.CreateAdminSessionWithContext(adminUserID, "127.0.0.1", "test-agent")
 	if err != nil {
-		t.Fatalf("CreateAdminSession: %v", err)
+		t.Fatalf("CreateAdminSessionWithContext: %v", err)
 	}
 
 	valid, err := store.ValidateAdminSession(id)
@@ -104,13 +126,14 @@ func TestAdminSession(t *testing.T) {
 
 func TestAdminSessionFingerprintBinding(t *testing.T) {
 	store := testDB(t)
+	adminUserID := seedAdminUser(t, store)
 
-	id, err := store.CreateAdminSessionWithContext("127.0.0.1", "test-agent")
+	id, err := store.CreateAdminSessionWithContext(adminUserID, "127.0.0.1", "test-agent")
 	if err != nil {
 		t.Fatalf("CreateAdminSessionWithContext: %v", err)
 	}
 
-	valid, err := store.ValidateAdminSessionWithContext(id, "127.0.0.1", "test-agent")
+	valid, _, err := store.ValidateAdminSessionWithContext(id, "127.0.0.1", "test-agent")
 	if err != nil {
 		t.Fatalf("ValidateAdminSessionWithContext: %v", err)
 	}
@@ -118,7 +141,7 @@ func TestAdminSessionFingerprintBinding(t *testing.T) {
 		t.Fatal("session should validate for same fingerprint")
 	}
 
-	valid, err = store.ValidateAdminSessionWithContext(id, "127.0.0.2", "test-agent")
+	valid, _, err = store.ValidateAdminSessionWithContext(id, "127.0.0.2", "test-agent")
 	if err != nil {
 		t.Fatalf("ValidateAdminSessionWithContext mismatch: %v", err)
 	}

@@ -11,7 +11,8 @@
     <div id="admin-login" class="panel">
         <h1>Acetate Admin</h1>
         <form id="login-form">
-            <input type="password" id="admin-token" placeholder="Admin token" autocomplete="off">
+            <input type="text" id="admin-username" placeholder="Username" autocomplete="username">
+            <input type="password" id="admin-password" placeholder="Password" autocomplete="current-password">
             <button type="submit">Login</button>
         </form>
         <div id="login-error" class="error hidden"></div>
@@ -37,6 +38,10 @@
                     <span id="cfg-artist"></span>
                 </div>
                 <div class="config-item">
+                    <label>Admin User</label>
+                    <span id="cfg-admin-user"></span>
+                </div>
+                <div class="config-item">
                     <label>Password</label>
                     <span id="cfg-password"></span>
                 </div>
@@ -55,6 +60,17 @@
                 <button type="submit">Update</button>
             </form>
             <div id="password-status" class="status hidden"></div>
+        </section>
+
+        <!-- Admin Password Section -->
+        <section id="section-admin-password" class="section">
+            <h2>Update Admin Password</h2>
+            <form id="admin-password-form" class="inline-form">
+                <input type="password" id="current-admin-password" placeholder="Current password" autocomplete="current-password">
+                <input type="password" id="new-admin-password" placeholder="New admin password" autocomplete="new-password">
+                <button type="submit">Update</button>
+            </form>
+            <div id="admin-password-status" class="status hidden"></div>
         </section>
 
         <!-- Cover Section -->

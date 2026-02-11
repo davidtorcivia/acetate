@@ -20,8 +20,6 @@ import (
 	"strings"
 	"time"
 
-	"golang.org/x/crypto/bcrypt"
-
 	"acetate/internal/analytics"
 	"acetate/internal/config"
 )
@@ -51,30 +49,14 @@ type reconcileApplyResult struct {
 	TitlesUpdated int `json:"titles_updated"`
 }
 
-func (s *Server) verifyAdminToken(input string) bool {
-	token := strings.TrimSpace(input)
-	if token == "" {
-		return false
-	}
-
-	if s.adminTokenHash != "" {
-		return bcrypt.CompareHashAndPassword([]byte(s.adminTokenHash), []byte(token)) == nil
-	}
-
-	if s.adminToken == "" {
-		return false
-	}
-	return secureTokenEqual(token, s.adminToken)
-}
-
-func (s *Server) recordAdminAuthAttempt(r *http.Request, outcome, reason string) {
+func (s *Server) recordAdminAuthAttempt(r *http.Request, attemptedUsername, outcome, reason string) {
 	clientIP := s.cfIPs.GetClientIP(r)
 	ipHash := hashForAudit(clientIP)
 	uaHash := hashForAudit(strings.TrimSpace(r.UserAgent()))
 
 	if _, err := s.db.Exec(
-		"INSERT INTO admin_auth_audit (client_ip_hash, user_agent_hash, outcome, reason) VALUES (?, ?, ?, ?)",
-		ipHash, uaHash, strings.TrimSpace(outcome), strings.TrimSpace(reason),
+		"INSERT INTO admin_auth_audit (client_ip_hash, user_agent_hash, attempted_username, outcome, reason) VALUES (?, ?, ?, ?, ?)",
+		ipHash, uaHash, strings.ToLower(strings.TrimSpace(attemptedUsername)), strings.TrimSpace(outcome), strings.TrimSpace(reason),
 	); err != nil {
 		// Best effort; auth should not fail because audit logging failed.
 		return

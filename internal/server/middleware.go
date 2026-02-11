@@ -1,12 +1,17 @@
 package server
 
 import (
+	"context"
 	"log"
 	"net/http"
 	"net/url"
 	"strings"
 	"time"
 )
+
+type contextKey string
+
+const adminUserIDKey contextKey = "admin_user_id"
 
 // requireSession checks for a valid listener session cookie.
 func (s *Server) requireSession(next http.Handler) http.Handler {
@@ -53,7 +58,7 @@ func (s *Server) requireAdmin(next http.Handler) http.Handler {
 
 		clientIP := s.cfIPs.GetClientIP(r)
 		userAgent := strings.TrimSpace(r.UserAgent())
-		valid, err := s.sessions.ValidateAdminSessionWithContext(cookie.Value, clientIP, userAgent)
+		valid, userID, err := s.sessions.ValidateAdminSessionWithContext(cookie.Value, clientIP, userAgent)
 		if err != nil {
 			log.Printf("admin session validate error: %v", err)
 			jsonError(w, "internal error", http.StatusInternalServerError)
@@ -73,7 +78,8 @@ func (s *Server) requireAdmin(next http.Handler) http.Handler {
 			return
 		}
 
-		next.ServeHTTP(w, r)
+		ctx := context.WithValue(r.Context(), adminUserIDKey, userID)
+		next.ServeHTTP(w, r.WithContext(ctx))
 	})
 }
 
@@ -170,4 +176,13 @@ func cacheControl(value string) func(http.Handler) http.Handler {
 			next.ServeHTTP(w, r)
 		})
 	}
+}
+
+func adminUserIDFromContext(r *http.Request) (int64, bool) {
+	v := r.Context().Value(adminUserIDKey)
+	id, ok := v.(int64)
+	if !ok || id <= 0 {
+		return 0, false
+	}
+	return id, true
 }

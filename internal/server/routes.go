@@ -2,8 +2,6 @@ package server
 
 import (
 	"bytes"
-	"crypto/sha256"
-	"crypto/subtle"
 	"errors"
 	"image"
 	"image/jpeg"
@@ -69,6 +67,7 @@ func (s *Server) routes() http.Handler {
 			r.Get("/api/tracks", s.handleAdminGetTracks)
 			r.With(bodyLimiter(102400)).Put("/api/tracks", s.handleAdminUpdateTracks)
 			r.With(bodyLimiter(1024)).Put("/api/password", s.handleAdminUpdatePassword)
+			r.With(bodyLimiter(4096)).Put("/api/admin-password", s.handleAdminUpdateAdminPassword)
 			r.With(bodyLimiter(10<<20)).Post("/api/cover", s.handleAdminUploadCover) // 10MB
 			r.Get("/api/config", s.handleAdminGetConfig)
 			r.Get("/api/reconcile", s.handleAdminReconcilePreview)
@@ -272,31 +271,36 @@ func (s *Server) handleAnalytics(w http.ResponseWriter, r *http.Request) {
 // --- Admin handlers ---
 
 func (s *Server) handleAdminAuth(w http.ResponseWriter, r *http.Request) {
-	if s.adminToken == "" && s.adminTokenHash == "" {
-		s.recordAdminAuthAttempt(r, "rejected", "admin_disabled")
-		jsonError(w, "admin disabled", http.StatusForbidden)
+	clientIP := s.cfIPs.GetClientIP(r)
+	var req struct {
+		Username string `json:"username"`
+		Password string `json:"password"`
+	}
+	if err := decodeJSONBody(r, &req); err != nil {
+		s.recordAdminAuthAttempt(r, "", "rejected", "bad_request")
+		jsonError(w, "bad request", http.StatusBadRequest)
 		return
 	}
+	username := strings.TrimSpace(req.Username)
 
-	clientIP := s.cfIPs.GetClientIP(r)
-	if !s.rateLimiter.Allow("admin:" + clientIP) {
-		s.recordAdminAuthAttempt(r, "rejected", "rate_limited")
+	// Rate-limit by client + attempted username to reduce brute-force effectiveness.
+	rateKey := "admin:" + clientIP + ":" + strings.ToLower(username)
+	if !s.rateLimiter.Allow(rateKey) {
+		s.recordAdminAuthAttempt(r, username, "rejected", "rate_limited")
 		jsonError(w, "rate limited", http.StatusTooManyRequests)
 		return
 	}
 
-	var req struct {
-		Token string `json:"token"`
-	}
-	if err := decodeJSONBody(r, &req); err != nil {
-		s.recordAdminAuthAttempt(r, "rejected", "bad_request")
-		jsonError(w, "bad request", http.StatusBadRequest)
-		return
-	}
-
-	if !s.verifyAdminToken(req.Token) {
-		s.recordAdminAuthAttempt(r, "rejected", "invalid_token")
-		jsonError(w, "unauthorized", http.StatusUnauthorized)
+	user, err := s.authenticateAdminCredentials(username, req.Password)
+	if err != nil {
+		if errors.Is(err, errAdminInvalidCreds) {
+			s.recordAdminAuthAttempt(r, username, "rejected", "invalid_credentials")
+			jsonError(w, "unauthorized", http.StatusUnauthorized)
+			return
+		}
+		log.Printf("admin auth error: %v", err)
+		s.recordAdminAuthAttempt(r, username, "error", "auth_query_failed")
+		jsonError(w, "internal error", http.StatusInternalServerError)
 		return
 	}
 
@@ -304,10 +308,10 @@ func (s *Server) handleAdminAuth(w http.ResponseWriter, r *http.Request) {
 		_ = s.sessions.DeleteAdminSession(oldCookie.Value)
 	}
 
-	sessionID, err := s.sessions.CreateAdminSessionWithContext(clientIP, strings.TrimSpace(r.UserAgent()))
+	sessionID, err := s.sessions.CreateAdminSessionWithContext(user.ID, clientIP, strings.TrimSpace(r.UserAgent()))
 	if err != nil {
 		log.Printf("create admin session error: %v", err)
-		s.recordAdminAuthAttempt(r, "error", "session_create_failed")
+		s.recordAdminAuthAttempt(r, username, "error", "session_create_failed")
 		jsonError(w, "internal error", http.StatusInternalServerError)
 		return
 	}
@@ -322,8 +326,11 @@ func (s *Server) handleAdminAuth(w http.ResponseWriter, r *http.Request) {
 		SameSite: http.SameSiteStrictMode,
 	})
 
-	s.recordAdminAuthAttempt(r, "success", "ok")
-	jsonOK(w, map[string]string{"status": "ok"})
+	s.recordAdminAuthAttempt(r, user.Username, "success", "ok")
+	jsonOK(w, map[string]string{
+		"status":   "ok",
+		"username": user.Username,
+	})
 }
 
 func (s *Server) handleAdminLogout(w http.ResponseWriter, r *http.Request) {
@@ -476,6 +483,50 @@ func (s *Server) handleAdminUpdatePassword(w http.ResponseWriter, r *http.Reques
 	jsonOK(w, map[string]string{"status": "ok"})
 }
 
+func (s *Server) handleAdminUpdateAdminPassword(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		CurrentPassword string `json:"current_password"`
+		NewPassword     string `json:"new_password"`
+	}
+	if err := decodeJSONBody(r, &req); err != nil {
+		jsonError(w, "bad request", http.StatusBadRequest)
+		return
+	}
+
+	adminUserID, ok := adminUserIDFromContext(r)
+	if !ok {
+		jsonError(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
+
+	err := s.updateAdminPassword(adminUserID, req.CurrentPassword, req.NewPassword)
+	if err != nil {
+		switch {
+		case errors.Is(err, errAdminInvalidCreds):
+			jsonError(w, "unauthorized", http.StatusUnauthorized)
+		case errors.Is(err, errAdminWeakPassword):
+			jsonError(w, "new password does not meet policy", http.StatusBadRequest)
+		default:
+			log.Printf("admin password update error: %v", err)
+			jsonError(w, "internal error", http.StatusInternalServerError)
+		}
+		return
+	}
+
+	// Force re-auth after password rotation.
+	http.SetCookie(w, &http.Cookie{
+		Name:     "acetate_admin",
+		Value:    "",
+		Path:     "/admin",
+		MaxAge:   -1,
+		HttpOnly: true,
+		Secure:   isSecureRequest(r),
+		SameSite: http.SameSiteStrictMode,
+	})
+
+	jsonOK(w, map[string]string{"status": "ok"})
+}
+
 func (s *Server) handleAdminUploadCover(w http.ResponseWriter, r *http.Request) {
 	file, _, err := r.FormFile("cover")
 	if err != nil {
@@ -531,6 +582,12 @@ func (s *Server) handleAdminUploadCover(w http.ResponseWriter, r *http.Request) 
 
 func (s *Server) handleAdminGetConfig(w http.ResponseWriter, r *http.Request) {
 	cfg := s.config.Get()
+	adminUsername := ""
+	if adminUserID, ok := adminUserIDFromContext(r); ok {
+		if username, err := s.getAdminUsernameByID(adminUserID); err == nil {
+			adminUsername = username
+		}
+	}
 	// Truncate password hash for display
 	passDisplay := ""
 	if cfg.Password != "" {
@@ -544,6 +601,7 @@ func (s *Server) handleAdminGetConfig(w http.ResponseWriter, r *http.Request) {
 	jsonOK(w, map[string]interface{}{
 		"title":         cfg.Title,
 		"artist":        cfg.Artist,
+		"admin_user":    adminUsername,
 		"password_set":  cfg.Password != "",
 		"password_hash": passDisplay,
 		"track_count":   len(cfg.Tracks),
@@ -658,12 +716,6 @@ func normalizeTrackUpdate(input []struct {
 	}
 
 	return normalized, nil
-}
-
-func secureTokenEqual(a, b string) bool {
-	sumA := sha256.Sum256([]byte(a))
-	sumB := sha256.Sum256([]byte(b))
-	return subtle.ConstantTimeCompare(sumA[:], sumB[:]) == 1
 }
 
 func serveEmbeddedFile(w http.ResponseWriter, r *http.Request, fsys fs.FS, path string) {

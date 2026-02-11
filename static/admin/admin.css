@@ -34,7 +34,8 @@ header {
 
 .panel form {
     display: flex;
-    gap: 8px;
+    flex-direction: column;
+    gap: 10px;
     margin-top: 16px;
 }
 
@@ -90,6 +91,7 @@ button:hover { background: #444; }
     display: flex;
     gap: 8px;
     align-items: center;
+    flex-wrap: wrap;
 }
 
 /* Sections */

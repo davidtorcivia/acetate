@@ -26,11 +26,16 @@ type testEnv struct {
 	dataDir  string
 }
 
+const (
+	testAdminUsername = "admin"
+	testAdminPassword = "test-admin-pass-123"
+)
+
 func setupTest(t *testing.T) *testEnv {
-	return setupTestWithAdmin(t, "test-admin-token", "")
+	return setupTestWithBootstrap(t, testAdminUsername, testAdminPassword, "")
 }
 
-func setupTestWithAdmin(t *testing.T, adminToken, adminTokenHash string) *testEnv {
+func setupTestWithBootstrap(t *testing.T, username, password, passwordHash string) *testEnv {
 	t.Helper()
 
 	albumDir := t.TempDir()
@@ -49,6 +54,10 @@ func setupTestWithAdmin(t *testing.T, adminToken, adminTokenHash string) *testEn
 	}
 	t.Cleanup(func() { db.Close() })
 
+	if err := EnsureAdminBootstrap(db, username, password, passwordHash); err != nil {
+		t.Fatalf("bootstrap admin user: %v", err)
+	}
+
 	// Create config with a password
 	hash, _ := bcrypt.GenerateFromPassword([]byte("testpass"), bcrypt.MinCost)
 	cfgMgr, err := config.NewManager(dataDir, albumDir)
@@ -63,8 +72,6 @@ func setupTestWithAdmin(t *testing.T, adminToken, adminTokenHash string) *testEn
 		ListenAddr:             ":0",
 		AlbumPath:              albumDir,
 		DataPath:               dataDir,
-		AdminToken:             adminToken,
-		AdminTokenHash:         adminTokenHash,
 		AnalyticsRetentionDays: 0,
 		MaintenanceInterval:    time.Hour,
 		DB:                     db,
@@ -103,7 +110,10 @@ func (env *testEnv) authenticate(t *testing.T) []*http.Cookie {
 func (env *testEnv) authenticateAdmin(t *testing.T) []*http.Cookie {
 	t.Helper()
 
-	body, _ := json.Marshal(map[string]string{"token": "test-admin-token"})
+	body, _ := json.Marshal(map[string]string{
+		"username": testAdminUsername,
+		"password": testAdminPassword,
+	})
 	req, _ := http.NewRequest(http.MethodPost, env.ts.URL+"/admin/api/auth", bytes.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Origin", env.ts.URL)
@@ -336,8 +346,11 @@ func TestCoverSupportsJPEGFallback(t *testing.T) {
 func TestAdminAuth(t *testing.T) {
 	env := setupTest(t)
 
-	// Wrong token → 401
-	body, _ := json.Marshal(map[string]string{"token": "wrong"})
+	// Wrong password → 401
+	body, _ := json.Marshal(map[string]string{
+		"username": testAdminUsername,
+		"password": "wrong-password",
+	})
 	req, _ := http.NewRequest(http.MethodPost, env.ts.URL+"/admin/api/auth", bytes.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Origin", env.ts.URL)
@@ -347,10 +360,10 @@ func TestAdminAuth(t *testing.T) {
 	}
 	resp.Body.Close()
 	if resp.StatusCode != http.StatusUnauthorized {
-		t.Errorf("wrong token status = %d, want 401", resp.StatusCode)
+		t.Errorf("wrong password status = %d, want 401", resp.StatusCode)
 	}
 
-	// Correct token → 200
+	// Correct credentials → 200
 	cookies := env.authenticateAdmin(t)
 	found := false
 	for _, c := range cookies {
@@ -366,7 +379,10 @@ func TestAdminAuth(t *testing.T) {
 func TestAdminRejectsMissingOrigin(t *testing.T) {
 	env := setupTest(t)
 
-	body, _ := json.Marshal(map[string]string{"token": "test-admin-token"})
+	body, _ := json.Marshal(map[string]string{
+		"username": testAdminUsername,
+		"password": testAdminPassword,
+	})
 	req, _ := http.NewRequest(http.MethodPost, env.ts.URL+"/admin/api/auth", bytes.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 	resp, err := env.ts.Client().Do(req)
@@ -522,15 +538,18 @@ func TestLogout(t *testing.T) {
 	}
 }
 
-func TestAdminAuthWithHashedToken(t *testing.T) {
-	hash, err := bcrypt.GenerateFromPassword([]byte("hashed-admin-token"), bcrypt.MinCost)
+func TestAdminAuthWithHashedBootstrapPassword(t *testing.T) {
+	hash, err := bcrypt.GenerateFromPassword([]byte("hashed-admin-pass-123"), bcrypt.MinCost)
 	if err != nil {
 		t.Fatalf("generate hash: %v", err)
 	}
 
-	env := setupTestWithAdmin(t, "", string(hash))
+	env := setupTestWithBootstrap(t, "admin2", "", string(hash))
 
-	body, _ := json.Marshal(map[string]string{"token": "hashed-admin-token"})
+	body, _ := json.Marshal(map[string]string{
+		"username": "admin2",
+		"password": "hashed-admin-pass-123",
+	})
 	req, _ := http.NewRequest(http.MethodPost, env.ts.URL+"/admin/api/auth", bytes.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Origin", env.ts.URL)
@@ -542,6 +561,66 @@ func TestAdminAuthWithHashedToken(t *testing.T) {
 
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("status = %d, want 200", resp.StatusCode)
+	}
+}
+
+func TestAdminUpdateOwnPassword(t *testing.T) {
+	env := setupTest(t)
+	adminCookies := env.authenticateAdmin(t)
+
+	body, _ := json.Marshal(map[string]string{
+		"current_password": testAdminPassword,
+		"new_password":     "new-admin-pass-456",
+	})
+	req, _ := http.NewRequest(http.MethodPut, env.ts.URL+"/admin/api/admin-password", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Origin", env.ts.URL)
+	for _, c := range adminCookies {
+		req.AddCookie(c)
+	}
+
+	resp, err := env.ts.Client().Do(req)
+	if err != nil {
+		t.Fatalf("update admin password request: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200", resp.StatusCode)
+	}
+
+	// Old password should no longer work.
+	oldAuthBody, _ := json.Marshal(map[string]string{
+		"username": testAdminUsername,
+		"password": testAdminPassword,
+	})
+	oldAuthReq, _ := http.NewRequest(http.MethodPost, env.ts.URL+"/admin/api/auth", bytes.NewReader(oldAuthBody))
+	oldAuthReq.Header.Set("Content-Type", "application/json")
+	oldAuthReq.Header.Set("Origin", env.ts.URL)
+	oldAuthResp, err := env.ts.Client().Do(oldAuthReq)
+	if err != nil {
+		t.Fatalf("old auth request: %v", err)
+	}
+	oldAuthResp.Body.Close()
+	if oldAuthResp.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("old password auth status = %d, want 401", oldAuthResp.StatusCode)
+	}
+
+	// New password should work.
+	newAuthBody, _ := json.Marshal(map[string]string{
+		"username": testAdminUsername,
+		"password": "new-admin-pass-456",
+	})
+	newAuthReq, _ := http.NewRequest(http.MethodPost, env.ts.URL+"/admin/api/auth", bytes.NewReader(newAuthBody))
+	newAuthReq.Header.Set("Content-Type", "application/json")
+	newAuthReq.Header.Set("Origin", env.ts.URL)
+	newAuthResp, err := env.ts.Client().Do(newAuthReq)
+	if err != nil {
+		t.Fatalf("new auth request: %v", err)
+	}
+	newAuthResp.Body.Close()
+	if newAuthResp.StatusCode != http.StatusOK {
+		t.Fatalf("new password auth status = %d, want 200", newAuthResp.StatusCode)
 	}
 }
 

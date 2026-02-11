@@ -29,8 +29,6 @@ type Server struct {
 	collector              *analytics.Collector
 	albumPath              string
 	dataPath               string
-	adminToken             string
-	adminTokenHash         string
 	analyticsRetentionDays int
 	maintenanceInterval    time.Duration
 	startedAt              time.Time
@@ -44,8 +42,6 @@ type Config struct {
 	ListenAddr             string
 	AlbumPath              string
 	DataPath               string
-	AdminToken             string
-	AdminTokenHash         string
 	AnalyticsRetentionDays int
 	MaintenanceInterval    time.Duration
 	DB                     *sql.DB
@@ -68,8 +64,6 @@ func New(cfg Config) *Server {
 		collector:              collector,
 		albumPath:              cfg.AlbumPath,
 		dataPath:               cfg.DataPath,
-		adminToken:             cfg.AdminToken,
-		adminTokenHash:         cfg.AdminTokenHash,
 		analyticsRetentionDays: cfg.AnalyticsRetentionDays,
 		maintenanceInterval:    cfg.MaintenanceInterval,
 		startedAt:              time.Now().UTC(),

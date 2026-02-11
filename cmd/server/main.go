@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/signal"
 	"strconv"
+	"strings"
 	"syscall"
 	"time"
 
@@ -19,13 +20,15 @@ func main() {
 	listenAddr := envOr("LISTEN_ADDR", ":8080")
 	albumPath := envOr("ALBUM_PATH", "./album")
 	dataPath := envOr("DATA_PATH", "./data")
-	adminToken := os.Getenv("ADMIN_TOKEN")
-	adminTokenHash := os.Getenv("ADMIN_TOKEN_HASH")
+	adminUsername := envOr("ADMIN_USERNAME", "admin")
+	adminPassword := os.Getenv("ADMIN_PASSWORD")
+	adminPasswordHash := os.Getenv("ADMIN_PASSWORD_HASH")
+	legacyAdminToken := os.Getenv("ADMIN_TOKEN")
 	analyticsRetentionDays := envInt("ANALYTICS_RETENTION_DAYS", 0)
 	maintenanceInterval := envDuration("ANALYTICS_MAINTENANCE_INTERVAL", 12*time.Hour)
 
-	if adminToken == "" && adminTokenHash == "" {
-		log.Println("WARNING: ADMIN_TOKEN not set — admin interface disabled")
+	if strings.TrimSpace(legacyAdminToken) != "" {
+		log.Println("WARNING: ADMIN_TOKEN is deprecated and ignored; use ADMIN_USERNAME + ADMIN_PASSWORD_HASH")
 	}
 
 	// Validate album path exists
@@ -39,6 +42,10 @@ func main() {
 		log.Fatalf("open database: %v", err)
 	}
 	defer db.Close()
+
+	if err := server.EnsureAdminBootstrap(db, adminUsername, adminPassword, adminPasswordHash); err != nil {
+		log.Fatalf("bootstrap admin user: %v", err)
+	}
 
 	// Load or generate config
 	cfgMgr, err := config.NewManager(dataPath, albumPath)
@@ -57,8 +64,6 @@ func main() {
 		ListenAddr:             listenAddr,
 		AlbumPath:              albumPath,
 		DataPath:               dataPath,
-		AdminToken:             adminToken,
-		AdminTokenHash:         adminTokenHash,
 		AnalyticsRetentionDays: analyticsRetentionDays,
 		MaintenanceInterval:    maintenanceInterval,
 		DB:                     db,

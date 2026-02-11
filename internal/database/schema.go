@@ -18,7 +18,18 @@ CREATE TABLE IF NOT EXISTS admin_sessions (
     created_at DATETIME NOT NULL,
     last_seen_at DATETIME,
     ip_hash TEXT,
-    user_agent_hash TEXT
+    user_agent_hash TEXT,
+    user_id INTEGER
+);
+
+CREATE TABLE IF NOT EXISTS admin_users (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    username TEXT NOT NULL UNIQUE COLLATE NOCASE,
+    password_hash TEXT NOT NULL,
+    is_active INTEGER NOT NULL DEFAULT 1,
+    created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    last_login_at DATETIME
 );
 
 CREATE TABLE IF NOT EXISTS events (
@@ -44,6 +55,7 @@ CREATE TABLE IF NOT EXISTS admin_auth_audit (
     occurred_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
     client_ip_hash TEXT,
     user_agent_hash TEXT,
+    attempted_username TEXT,
     outcome TEXT NOT NULL,
     reason TEXT
 );
@@ -53,6 +65,8 @@ CREATE INDEX IF NOT EXISTS idx_events_type ON events(event_type);
 CREATE INDEX IF NOT EXISTS idx_events_session ON events(session_id);
 CREATE INDEX IF NOT EXISTS idx_events_created_at ON events(created_at);
 CREATE INDEX IF NOT EXISTS idx_sessions_last_seen ON sessions(last_seen_at);
+CREATE INDEX IF NOT EXISTS idx_admin_sessions_user ON admin_sessions(user_id);
+CREATE INDEX IF NOT EXISTS idx_admin_users_username ON admin_users(username);
 CREATE INDEX IF NOT EXISTS idx_rollups_day ON analytics_rollups_daily(day);
 CREATE INDEX IF NOT EXISTS idx_rollups_track ON analytics_rollups_daily(track_stem);
 CREATE INDEX IF NOT EXISTS idx_admin_auth_audit_occurred ON admin_auth_audit(occurred_at);
@@ -71,6 +85,12 @@ func Migrate(db *sql.DB) error {
 		return err
 	}
 	if err := ensureColumnExists(db, "admin_sessions", "user_agent_hash", "TEXT"); err != nil {
+		return err
+	}
+	if err := ensureColumnExists(db, "admin_sessions", "user_id", "INTEGER"); err != nil {
+		return err
+	}
+	if err := ensureColumnExists(db, "admin_auth_audit", "attempted_username", "TEXT"); err != nil {
 		return err
 	}
 

@@ -2,8 +2,6 @@ package main
 
 import (
 	"bufio"
-	"crypto/rand"
-	"encoding/base64"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -90,19 +88,18 @@ func main() {
 		fatalf("save config: %v", err)
 	}
 
-	adminToken := promptAdminToken(reader)
+	adminUsername, adminPasswordHash := promptAdminBootstrap(reader)
 
 	envPath := filepath.Join(cwd, ".env")
 	updates := map[string]string{
-		"LISTEN_ADDR": listenAddr,
-		"ALBUM_PATH":  albumPath,
-		"DATA_PATH":   dataPath,
-	}
-	if adminToken != "" {
-		updates["ADMIN_TOKEN"] = adminToken
+		"LISTEN_ADDR":         listenAddr,
+		"ALBUM_PATH":          albumPath,
+		"DATA_PATH":           dataPath,
+		"ADMIN_USERNAME":      adminUsername,
+		"ADMIN_PASSWORD_HASH": adminPasswordHash,
 	}
 
-	if err := writeEnvFile(envPath, updates, adminToken == ""); err != nil {
+	if err := writeEnvFile(envPath, updates, true); err != nil {
 		fatalf("write .env: %v", err)
 	}
 
@@ -115,9 +112,7 @@ func main() {
 	fmt.Println("1) Start server locally: go run ./cmd/server")
 	fmt.Println("2) Or run in Docker:     docker compose up -d --build")
 	fmt.Println("3) Open listener UI:      http://localhost:8080")
-	if adminToken != "" {
-		fmt.Println("4) Open admin UI:         http://localhost:8080/admin")
-	}
+	fmt.Println("4) Open admin UI:         http://localhost:8080/admin")
 }
 
 func promptPath(reader *bufio.Reader, label, def string) string {
@@ -194,58 +189,62 @@ func promptHashedPassphrase(reader *bufio.Reader) string {
 	}
 }
 
-func promptAdminToken(reader *bufio.Reader) string {
-	existing := strings.TrimSpace(os.Getenv("ADMIN_TOKEN"))
-
+func promptAdminBootstrap(reader *bufio.Reader) (string, string) {
 	fmt.Println()
-	if existing != "" {
-		fmt.Println("An ADMIN_TOKEN is already set in your environment.")
-		if promptYesNo(reader, "Reuse existing ADMIN_TOKEN?", true) {
-			return existing
+	fmt.Println("Configure admin login credentials.")
+
+	existingUsername := strings.TrimSpace(os.Getenv("ADMIN_USERNAME"))
+	if existingUsername == "" {
+		existingUsername = "admin"
+	}
+	username := promptText(reader, "Admin username", existingUsername)
+
+	existingHash := strings.TrimSpace(os.Getenv("ADMIN_PASSWORD_HASH"))
+	if existingHash != "" {
+		fmt.Println("An ADMIN_PASSWORD_HASH is already set in your environment.")
+		if promptYesNo(reader, "Reuse existing ADMIN_PASSWORD_HASH?", true) {
+			return username, existingHash
 		}
 	}
 
-	if !promptYesNo(reader, "Enable admin interface?", true) {
-		return ""
-	}
-
-	fmt.Print("Admin token mode [g=generate, i=input] [g]: ")
-	mode, _ := reader.ReadString('\n')
-	mode = strings.ToLower(strings.TrimSpace(mode))
-	if mode == "" || mode == "g" {
-		token, err := generateToken()
-		if err != nil {
-			fatalf("generate admin token: %v", err)
+	for {
+		fmt.Print("Admin password (min 12 chars, include letters and numbers): ")
+		pass1, _ := reader.ReadString('\n')
+		pass1 = strings.TrimSpace(pass1)
+		if len(pass1) < 12 {
+			fmt.Println("Password must be at least 12 characters.")
+			continue
 		}
-		fmt.Println("Generated admin token and wrote it to .env")
-		return token
-	}
-	if mode == "i" {
-		for {
-			fmt.Print("Admin token: ")
-			v, _ := reader.ReadString('\n')
-			v = strings.TrimSpace(v)
-			if v != "" {
-				return v
+
+		hasLetter := false
+		hasDigit := false
+		for _, r := range pass1 {
+			if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') {
+				hasLetter = true
 			}
-			fmt.Println("Admin token cannot be empty.")
+			if r >= '0' && r <= '9' {
+				hasDigit = true
+			}
 		}
-	}
+		if !hasLetter || !hasDigit {
+			fmt.Println("Password must include letters and numbers.")
+			continue
+		}
 
-	fmt.Println("Unknown mode. Using generated token.")
-	token, err := generateToken()
-	if err != nil {
-		fatalf("generate admin token: %v", err)
-	}
-	return token
-}
+		fmt.Print("Confirm admin password: ")
+		pass2, _ := reader.ReadString('\n')
+		pass2 = strings.TrimSpace(pass2)
+		if pass1 != pass2 {
+			fmt.Println("Passwords do not match. Try again.")
+			continue
+		}
 
-func generateToken() (string, error) {
-	b := make([]byte, 32)
-	if _, err := rand.Read(b); err != nil {
-		return "", err
+		hash, err := bcrypt.GenerateFromPassword([]byte(pass1), bcrypt.DefaultCost)
+		if err != nil {
+			fatalf("hash admin password: %v", err)
+		}
+		return username, string(hash)
 	}
-	return base64.RawURLEncoding.EncodeToString(b), nil
 }
 
 func scanAlbum(albumPath string) ([]string, error) {
@@ -267,7 +266,7 @@ func scanAlbum(albumPath string) ([]string, error) {
 	return stems, nil
 }
 
-func writeEnvFile(path string, updates map[string]string, removeAdmin bool) error {
+func writeEnvFile(path string, updates map[string]string, removeLegacyAdmin bool) error {
 	lines := []envLine{}
 	if data, err := os.ReadFile(path); err == nil {
 		rawLines := strings.Split(strings.ReplaceAll(string(data), "\r\n", "\n"), "\n")
@@ -299,7 +298,7 @@ func writeEnvFile(path string, updates map[string]string, removeAdmin bool) erro
 		}
 
 		key := line.key
-		if removeAdmin && key == "ADMIN_TOKEN" {
+		if removeLegacyAdmin && (key == "ADMIN_TOKEN" || key == "ADMIN_PASSWORD") {
 			seen[key] = true
 			continue
 		}
