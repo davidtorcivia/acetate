@@ -3,6 +3,7 @@ package server
 import (
 	"bytes"
 	"encoding/json"
+	"io"
 	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
@@ -10,6 +11,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"acetate/internal/config"
 	"acetate/internal/database"
@@ -25,6 +27,10 @@ type testEnv struct {
 }
 
 func setupTest(t *testing.T) *testEnv {
+	return setupTestWithAdmin(t, "test-admin-token", "")
+}
+
+func setupTestWithAdmin(t *testing.T, adminToken, adminTokenHash string) *testEnv {
 	t.Helper()
 
 	albumDir := t.TempDir()
@@ -54,12 +60,15 @@ func setupTest(t *testing.T) *testEnv {
 	cfgMgr.Update(cfg)
 
 	srv := New(Config{
-		ListenAddr: ":0",
-		AlbumPath:  albumDir,
-		DataPath:   dataDir,
-		AdminToken: "test-admin-token",
-		DB:         db,
-		ConfigMgr:  cfgMgr,
+		ListenAddr:             ":0",
+		AlbumPath:              albumDir,
+		DataPath:               dataDir,
+		AdminToken:             adminToken,
+		AdminTokenHash:         adminTokenHash,
+		AnalyticsRetentionDays: 0,
+		MaintenanceInterval:    time.Hour,
+		DB:                     db,
+		ConfigMgr:              cfgMgr,
 	})
 
 	ts := httptest.NewServer(srv.routes())
@@ -510,5 +519,177 @@ func TestLogout(t *testing.T) {
 
 	if resp.StatusCode != http.StatusUnauthorized {
 		t.Errorf("post-logout status = %d, want 401", resp.StatusCode)
+	}
+}
+
+func TestAdminAuthWithHashedToken(t *testing.T) {
+	hash, err := bcrypt.GenerateFromPassword([]byte("hashed-admin-token"), bcrypt.MinCost)
+	if err != nil {
+		t.Fatalf("generate hash: %v", err)
+	}
+
+	env := setupTestWithAdmin(t, "", string(hash))
+
+	body, _ := json.Marshal(map[string]string{"token": "hashed-admin-token"})
+	req, _ := http.NewRequest(http.MethodPost, env.ts.URL+"/admin/api/auth", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Origin", env.ts.URL)
+	resp, err := env.ts.Client().Do(req)
+	if err != nil {
+		t.Fatalf("admin auth request: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200", resp.StatusCode)
+	}
+}
+
+func TestAdminAnalyticsFiltersByStem(t *testing.T) {
+	env := setupTest(t)
+	adminCookies := env.authenticateAdmin(t)
+
+	_, _ = env.srv.db.Exec("INSERT INTO events (session_id, event_type, track_stem, created_at) VALUES ('s1', 'play', '01-gathering', datetime('now'))")
+	_, _ = env.srv.db.Exec("INSERT INTO events (session_id, event_type, track_stem, created_at) VALUES ('s2', 'play', '02-hollow', datetime('now'))")
+
+	req, _ := http.NewRequest(http.MethodGet, env.ts.URL+"/admin/api/analytics?stems=01-gathering", nil)
+	for _, c := range adminCookies {
+		req.AddCookie(c)
+	}
+
+	resp, err := env.ts.Client().Do(req)
+	if err != nil {
+		t.Fatalf("analytics request: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200", resp.StatusCode)
+	}
+
+	var payload struct {
+		Tracks []struct {
+			Stem string `json:"stem"`
+		} `json:"tracks"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&payload); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if len(payload.Tracks) != 1 || payload.Tracks[0].Stem != "01-gathering" {
+		t.Fatalf("unexpected tracks payload: %+v", payload.Tracks)
+	}
+}
+
+func TestAdminReconcilePreview(t *testing.T) {
+	env := setupTest(t)
+	adminCookies := env.authenticateAdmin(t)
+
+	if err := os.WriteFile(filepath.Join(env.albumDir, "03-new-song.mp3"), []byte("fake"), 0644); err != nil {
+		t.Fatalf("write new song: %v", err)
+	}
+
+	req, _ := http.NewRequest(http.MethodGet, env.ts.URL+"/admin/api/reconcile", nil)
+	for _, c := range adminCookies {
+		req.AddCookie(c)
+	}
+
+	resp, err := env.ts.Client().Do(req)
+	if err != nil {
+		t.Fatalf("reconcile request: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200", resp.StatusCode)
+	}
+
+	var payload struct {
+		AlbumOnly []struct {
+			Stem string `json:"stem"`
+		} `json:"album_only"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&payload); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if len(payload.AlbumOnly) != 1 || payload.AlbumOnly[0].Stem != "03-new-song" {
+		t.Fatalf("unexpected album_only payload: %+v", payload.AlbumOnly)
+	}
+}
+
+func TestAdminOpsHealth(t *testing.T) {
+	env := setupTest(t)
+	adminCookies := env.authenticateAdmin(t)
+
+	req, _ := http.NewRequest(http.MethodGet, env.ts.URL+"/admin/api/ops/health", nil)
+	for _, c := range adminCookies {
+		req.AddCookie(c)
+	}
+
+	resp, err := env.ts.Client().Do(req)
+	if err != nil {
+		t.Fatalf("health request: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200", resp.StatusCode)
+	}
+
+	var payload map[string]interface{}
+	if err := json.NewDecoder(resp.Body).Decode(&payload); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if payload["status"] != "ok" {
+		t.Fatalf("unexpected health status: %v", payload["status"])
+	}
+}
+
+func TestAdminExportEventsCSV(t *testing.T) {
+	env := setupTest(t)
+	adminCookies := env.authenticateAdmin(t)
+	listenerCookies := env.authenticate(t)
+
+	events := []map[string]interface{}{
+		{"event_type": "play", "track_stem": "01-gathering"},
+	}
+	body, _ := json.Marshal(events)
+	req, _ := http.NewRequest(http.MethodPost, env.ts.URL+"/api/analytics", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	for _, c := range listenerCookies {
+		req.AddCookie(c)
+	}
+	resp, err := env.ts.Client().Do(req)
+	if err != nil {
+		t.Fatalf("analytics request: %v", err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusNoContent {
+		t.Fatalf("analytics status = %d, want 204", resp.StatusCode)
+	}
+
+	exportReq, _ := http.NewRequest(http.MethodGet, env.ts.URL+"/admin/api/export/events?format=csv", nil)
+	for _, c := range adminCookies {
+		exportReq.AddCookie(c)
+	}
+	exportResp, err := env.ts.Client().Do(exportReq)
+	if err != nil {
+		t.Fatalf("export request: %v", err)
+	}
+	defer exportResp.Body.Close()
+
+	if exportResp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200", exportResp.StatusCode)
+	}
+	if ct := exportResp.Header.Get("Content-Type"); !strings.Contains(ct, "text/csv") {
+		t.Fatalf("content-type = %q, want text/csv", ct)
+	}
+
+	data, err := io.ReadAll(exportResp.Body)
+	if err != nil {
+		t.Fatalf("read export body: %v", err)
+	}
+	bodyText := string(data)
+	if !strings.Contains(bodyText, "event_type") || !strings.Contains(bodyText, "play") {
+		t.Fatalf("unexpected csv body: %q", bodyText)
 	}
 }

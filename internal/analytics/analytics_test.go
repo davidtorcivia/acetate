@@ -8,6 +8,8 @@ import (
 	"acetate/internal/database"
 )
 
+const testSessionID = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+
 func testCollector(t *testing.T) *Collector {
 	t.Helper()
 	dir := t.TempDir()
@@ -131,14 +133,14 @@ func TestRecordBatch(t *testing.T) {
 		{"event_type": "pause", "track_stem": "01-gathering", "position_seconds": 30.5}
 	]`)
 
-	if err := c.RecordBatch("sess1", data); err != nil {
+	if err := c.RecordBatch(testSessionID, data); err != nil {
 		t.Fatalf("RecordBatch: %v", err)
 	}
 
 	c.Close()
 
 	var count int
-	db.QueryRow("SELECT COUNT(*) FROM events WHERE session_id = 'sess1'").Scan(&count)
+	db.QueryRow("SELECT COUNT(*) FROM events WHERE session_id = ?", testSessionID).Scan(&count)
 	if count != 2 {
 		t.Errorf("expected 2 events, got %d", count)
 	}
@@ -190,7 +192,7 @@ func TestRecordBatchRejectsOversizedBatch(t *testing.T) {
 	}
 	data, _ := json.Marshal(events)
 
-	if err := c.RecordBatch("sess1", data); err == nil {
+	if err := c.RecordBatch(testSessionID, data); err == nil {
 		t.Fatal("expected oversized batch error")
 	}
 }
@@ -210,16 +212,25 @@ func TestRecordBatchSkipsInvalidEvents(t *testing.T) {
 		{"event_type":"bogus","track_stem":"01-gathering"},
 		{"event_type":"pause","track_stem":"../../etc/passwd"}
 	]`)
-	if err := c.RecordBatch("sess1", data); err != nil {
+	if err := c.RecordBatch(testSessionID, data); err != nil {
 		t.Fatalf("RecordBatch: %v", err)
 	}
 	c.Close()
 
 	var count int
-	if err := db.QueryRow("SELECT COUNT(*) FROM events WHERE session_id='sess1'").Scan(&count); err != nil {
+	if err := db.QueryRow("SELECT COUNT(*) FROM events WHERE session_id=?", testSessionID).Scan(&count); err != nil {
 		t.Fatalf("query count: %v", err)
 	}
 	if count != 1 {
 		t.Fatalf("expected 1 valid event, got %d", count)
+	}
+}
+
+func TestRecordBatchRejectsInvalidSessionID(t *testing.T) {
+	c := testCollector(t)
+
+	data := []byte(`[{"event_type":"play","track_stem":"01-gathering"}]`)
+	if err := c.RecordBatch("invalid-session", data); err == nil {
+		t.Fatal("expected invalid session error")
 	}
 }

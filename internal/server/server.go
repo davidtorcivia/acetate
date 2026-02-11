@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"sync"
 	"time"
 
 	"acetate/internal/analytics"
@@ -19,26 +20,36 @@ import (
 
 // Server is the main HTTP server.
 type Server struct {
-	httpServer  *http.Server
-	db          *sql.DB
-	config      *config.Manager
-	sessions    *auth.SessionStore
-	rateLimiter *auth.RateLimiter
-	cfIPs       *auth.CloudflareIPs
-	collector   *analytics.Collector
-	albumPath   string
-	dataPath    string
-	adminToken  string
+	httpServer             *http.Server
+	db                     *sql.DB
+	config                 *config.Manager
+	sessions               *auth.SessionStore
+	rateLimiter            *auth.RateLimiter
+	cfIPs                  *auth.CloudflareIPs
+	collector              *analytics.Collector
+	albumPath              string
+	dataPath               string
+	adminToken             string
+	adminTokenHash         string
+	analyticsRetentionDays int
+	maintenanceInterval    time.Duration
+	startedAt              time.Time
+	maintenanceDone        chan struct{}
+	maintenanceWG          sync.WaitGroup
+	maintenanceStopOnce    sync.Once
 }
 
 // Config holds server configuration.
 type Config struct {
-	ListenAddr string
-	AlbumPath  string
-	DataPath   string
-	AdminToken string
-	DB         *sql.DB
-	ConfigMgr  *config.Manager
+	ListenAddr             string
+	AlbumPath              string
+	DataPath               string
+	AdminToken             string
+	AdminTokenHash         string
+	AnalyticsRetentionDays int
+	MaintenanceInterval    time.Duration
+	DB                     *sql.DB
+	ConfigMgr              *config.Manager
 }
 
 // New creates a new Server with all dependencies wired.
@@ -49,15 +60,23 @@ func New(cfg Config) *Server {
 	collector := analytics.NewCollector(cfg.DB)
 
 	s := &Server{
-		db:          cfg.DB,
-		config:      cfg.ConfigMgr,
-		sessions:    sessions,
-		rateLimiter: rateLimiter,
-		cfIPs:       cfIPs,
-		collector:   collector,
-		albumPath:   cfg.AlbumPath,
-		dataPath:    cfg.DataPath,
-		adminToken:  cfg.AdminToken,
+		db:                     cfg.DB,
+		config:                 cfg.ConfigMgr,
+		sessions:               sessions,
+		rateLimiter:            rateLimiter,
+		cfIPs:                  cfIPs,
+		collector:              collector,
+		albumPath:              cfg.AlbumPath,
+		dataPath:               cfg.DataPath,
+		adminToken:             cfg.AdminToken,
+		adminTokenHash:         cfg.AdminTokenHash,
+		analyticsRetentionDays: cfg.AnalyticsRetentionDays,
+		maintenanceInterval:    cfg.MaintenanceInterval,
+		startedAt:              time.Now().UTC(),
+		maintenanceDone:        make(chan struct{}),
+	}
+	if s.maintenanceInterval <= 0 {
+		s.maintenanceInterval = 12 * time.Hour
 	}
 
 	s.httpServer = &http.Server{
@@ -67,6 +86,8 @@ func New(cfg Config) *Server {
 		WriteTimeout: 5 * time.Minute, // Long for MP3 streaming
 		IdleTimeout:  120 * time.Second,
 	}
+
+	s.startMaintenanceLoop()
 
 	return s
 }
@@ -88,6 +109,8 @@ func (s *Server) Shutdown(ctx context.Context) {
 		log.Printf("HTTP shutdown error: %v", err)
 	}
 
+	s.stopMaintenanceLoop()
+
 	log.Println("flushing analytics...")
 	s.collector.Close()
 
@@ -95,6 +118,49 @@ func (s *Server) Shutdown(ctx context.Context) {
 	s.sessions.Close()
 	s.rateLimiter.Close()
 	s.cfIPs.Close()
+}
+
+func (s *Server) startMaintenanceLoop() {
+	s.maintenanceWG.Add(1)
+	go func() {
+		defer s.maintenanceWG.Done()
+
+		run := func() {
+			flushCtx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+			_ = s.collector.FlushNow(flushCtx)
+			cancel()
+
+			res, err := analytics.RunMaintenance(s.db, time.Now().UTC(), s.analyticsRetentionDays)
+			if err != nil {
+				log.Printf("analytics maintenance error: %v", err)
+				return
+			}
+			if res.RolledDays > 0 || res.PrunedRows > 0 {
+				log.Printf("analytics maintenance: rolled_days=%d rollup_rows=%d pruned_rows=%d retention_days=%d",
+					res.RolledDays, res.RollupRows, res.PrunedRows, res.RetentionDays)
+			}
+		}
+
+		run()
+		ticker := time.NewTicker(s.maintenanceInterval)
+		defer ticker.Stop()
+
+		for {
+			select {
+			case <-ticker.C:
+				run()
+			case <-s.maintenanceDone:
+				return
+			}
+		}
+	}()
+}
+
+func (s *Server) stopMaintenanceLoop() {
+	s.maintenanceStopOnce.Do(func() {
+		close(s.maintenanceDone)
+		s.maintenanceWG.Wait()
+	})
 }
 
 // Helper functions

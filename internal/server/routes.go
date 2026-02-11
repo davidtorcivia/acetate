@@ -71,6 +71,13 @@ func (s *Server) routes() http.Handler {
 			r.With(bodyLimiter(1024)).Put("/api/password", s.handleAdminUpdatePassword)
 			r.With(bodyLimiter(10<<20)).Post("/api/cover", s.handleAdminUploadCover) // 10MB
 			r.Get("/api/config", s.handleAdminGetConfig)
+			r.Get("/api/reconcile", s.handleAdminReconcilePreview)
+			r.With(bodyLimiter(4096)).Post("/api/reconcile", s.handleAdminReconcileApply)
+			r.Get("/api/ops/health", s.handleAdminOpsHealth)
+			r.Get("/api/ops/stats", s.handleAdminOpsStats)
+			r.With(bodyLimiter(4096)).Post("/api/ops/maintenance", s.handleAdminOpsMaintenance)
+			r.Get("/api/export/events", s.handleAdminExportEvents)
+			r.Get("/api/export/backup", s.handleAdminExportBackup)
 		})
 
 		// Serve admin static files
@@ -265,13 +272,15 @@ func (s *Server) handleAnalytics(w http.ResponseWriter, r *http.Request) {
 // --- Admin handlers ---
 
 func (s *Server) handleAdminAuth(w http.ResponseWriter, r *http.Request) {
-	if s.adminToken == "" {
+	if s.adminToken == "" && s.adminTokenHash == "" {
+		s.recordAdminAuthAttempt(r, "rejected", "admin_disabled")
 		jsonError(w, "admin disabled", http.StatusForbidden)
 		return
 	}
 
 	clientIP := s.cfIPs.GetClientIP(r)
 	if !s.rateLimiter.Allow("admin:" + clientIP) {
+		s.recordAdminAuthAttempt(r, "rejected", "rate_limited")
 		jsonError(w, "rate limited", http.StatusTooManyRequests)
 		return
 	}
@@ -280,11 +289,13 @@ func (s *Server) handleAdminAuth(w http.ResponseWriter, r *http.Request) {
 		Token string `json:"token"`
 	}
 	if err := decodeJSONBody(r, &req); err != nil {
+		s.recordAdminAuthAttempt(r, "rejected", "bad_request")
 		jsonError(w, "bad request", http.StatusBadRequest)
 		return
 	}
 
-	if !secureTokenEqual(req.Token, s.adminToken) {
+	if !s.verifyAdminToken(req.Token) {
+		s.recordAdminAuthAttempt(r, "rejected", "invalid_token")
 		jsonError(w, "unauthorized", http.StatusUnauthorized)
 		return
 	}
@@ -293,9 +304,10 @@ func (s *Server) handleAdminAuth(w http.ResponseWriter, r *http.Request) {
 		_ = s.sessions.DeleteAdminSession(oldCookie.Value)
 	}
 
-	sessionID, err := s.sessions.CreateAdminSession()
+	sessionID, err := s.sessions.CreateAdminSessionWithContext(clientIP, strings.TrimSpace(r.UserAgent()))
 	if err != nil {
 		log.Printf("create admin session error: %v", err)
+		s.recordAdminAuthAttempt(r, "error", "session_create_failed")
 		jsonError(w, "internal error", http.StatusInternalServerError)
 		return
 	}
@@ -310,6 +322,7 @@ func (s *Server) handleAdminAuth(w http.ResponseWriter, r *http.Request) {
 		SameSite: http.SameSiteStrictMode,
 	})
 
+	s.recordAdminAuthAttempt(r, "success", "ok")
 	jsonOK(w, map[string]string{"status": "ok"})
 }
 
@@ -333,21 +346,29 @@ func (s *Server) handleAdminLogout(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleAdminAnalytics(w http.ResponseWriter, r *http.Request) {
-	trackStats, err := analytics.GetTrackStats(s.db)
+	filter, err := parseAnalyticsFilter(r.URL.Query())
+	if err != nil {
+		jsonError(w, "bad request", http.StatusBadRequest)
+		return
+	}
+
+	limit := clampInt(parseOptionalInt(r.URL.Query().Get("sessions_limit"), 50), 1, 200)
+
+	trackStats, err := analytics.GetTrackStatsFiltered(s.db, filter)
 	if err != nil {
 		log.Printf("track stats error: %v", err)
 		jsonError(w, "internal error", http.StatusInternalServerError)
 		return
 	}
 
-	overall, err := analytics.GetOverallStats(s.db)
+	overall, err := analytics.GetOverallStatsFiltered(s.db, filter)
 	if err != nil {
 		log.Printf("overall stats error: %v", err)
 		jsonError(w, "internal error", http.StatusInternalServerError)
 		return
 	}
 
-	sessions, err := analytics.GetSessionTimeline(s.db, 50)
+	sessions, err := analytics.GetSessionTimelineFiltered(s.db, limit, filter)
 	if err != nil {
 		log.Printf("session timeline error: %v", err)
 		jsonError(w, "internal error", http.StatusInternalServerError)
@@ -357,7 +378,7 @@ func (s *Server) handleAdminAnalytics(w http.ResponseWriter, r *http.Request) {
 	// Get heatmaps for each track with stats
 	heatmaps := make(map[string][]analytics.DropoutBin)
 	for _, ts := range trackStats {
-		bins, err := analytics.GetDropoutHeatmap(s.db, ts.Stem)
+		bins, err := analytics.GetDropoutHeatmapFiltered(s.db, ts.Stem, filter)
 		if err == nil {
 			heatmaps[ts.Stem] = bins
 		}
@@ -368,6 +389,12 @@ func (s *Server) handleAdminAnalytics(w http.ResponseWriter, r *http.Request) {
 		"overall":  overall,
 		"sessions": sessions,
 		"heatmaps": heatmaps,
+		"filter": map[string]interface{}{
+			"from":        formatFilterTime(filter.From),
+			"to":          formatFilterTime(filter.To),
+			"stems":       filter.Stems,
+			"event_types": filter.EventTypes,
+		},
 	})
 }
 

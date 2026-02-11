@@ -125,9 +125,25 @@ func (m *Manager) save(cfg *Config) error {
 var numericPrefixRe = regexp.MustCompile(`^\d+[-_]?`)
 
 func (m *Manager) generateDefault(albumPath string) error {
+	tracks, err := ScanAlbumTracks(albumPath)
+	if err != nil {
+		return err
+	}
+
+	cfg := Config{
+		Title:  "Album Title",
+		Artist: "Artist Name",
+		Tracks: tracks,
+	}
+
+	return m.save(&cfg)
+}
+
+// ScanAlbumTracks reads MP3 files from disk and returns a sorted default track list.
+func ScanAlbumTracks(albumPath string) ([]Track, error) {
 	entries, err := os.ReadDir(albumPath)
 	if err != nil {
-		return fmt.Errorf("scan album directory: %w", err)
+		return nil, fmt.Errorf("scan album directory: %w", err)
 	}
 
 	var tracks []Track
@@ -149,13 +165,7 @@ func (m *Manager) generateDefault(albumPath string) error {
 		return tracks[i].Stem < tracks[j].Stem
 	})
 
-	cfg := Config{
-		Title:  "Album Title",
-		Artist: "Artist Name",
-		Tracks: tracks,
-	}
-
-	return m.save(&cfg)
+	return tracks, nil
 }
 
 func deriveTitleFromMetadata(mp3Path, stem string) string {

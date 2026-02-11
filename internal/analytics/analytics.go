@@ -1,9 +1,12 @@
 package analytics
 
 import (
+	"bytes"
+	"context"
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"io"
 	"log"
 	"strings"
 	"sync"
@@ -19,6 +22,9 @@ const (
 	DrainTimeout  = 10 * time.Second
 	MaxBatchSize  = 500
 	MaxMetaBytes  = 4096
+	MaxMetaKeys   = 32
+	MaxMetaDepth  = 4
+	MaxStringSize = 512
 )
 
 // Event represents an analytics event from the client.
@@ -51,20 +57,23 @@ var validEventTypes = map[string]bool{
 
 // Collector manages buffered analytics event ingestion.
 type Collector struct {
-	db      *sql.DB
-	events  chan Event
-	done    chan struct{}
-	wg      sync.WaitGroup
-	once    sync.Once
-	dropped atomic.Int64
+	db       *sql.DB
+	events   chan Event
+	flushReq chan chan struct{}
+	done     chan struct{}
+	wg       sync.WaitGroup
+	once     sync.Once
+	dropped  atomic.Int64
+	rejected atomic.Int64
 }
 
 // NewCollector creates an analytics collector with a buffered channel and flush goroutine.
 func NewCollector(db *sql.DB) *Collector {
 	c := &Collector{
-		db:     db,
-		events: make(chan Event, ChannelBuffer),
-		done:   make(chan struct{}),
+		db:       db,
+		events:   make(chan Event, ChannelBuffer),
+		flushReq: make(chan chan struct{}),
+		done:     make(chan struct{}),
 	}
 	c.wg.Add(1)
 	go c.flushLoop()
@@ -94,6 +103,32 @@ func (c *Collector) DroppedCount() int64 {
 	return c.dropped.Load()
 }
 
+// RejectedCount returns the number of events rejected by ingestion validation.
+func (c *Collector) RejectedCount() int64 {
+	return c.rejected.Load()
+}
+
+// FlushNow forces a synchronous flush of currently buffered events.
+func (c *Collector) FlushNow(ctx context.Context) error {
+	ack := make(chan struct{})
+	select {
+	case c.flushReq <- ack:
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-c.done:
+		return errors.New("collector closed")
+	}
+
+	select {
+	case <-ack:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-c.done:
+		return errors.New("collector closed")
+	}
+}
+
 // Close stops the collector and drains remaining events.
 func (c *Collector) Close() {
 	c.once.Do(func() {
@@ -103,6 +138,9 @@ func (c *Collector) Close() {
 		// Log dropped events
 		if d := c.dropped.Load(); d > 0 {
 			log.Printf("analytics: %d events dropped due to backpressure", d)
+		}
+		if r := c.rejected.Load(); r > 0 {
+			log.Printf("analytics: %d events rejected by validation", r)
 		}
 	})
 }
@@ -129,6 +167,13 @@ func (c *Collector) flushLoop() {
 				c.flush(batch)
 				batch = batch[:0]
 			}
+
+		case ack := <-c.flushReq:
+			if len(batch) > 0 {
+				c.flush(batch)
+				batch = batch[:0]
+			}
+			close(ack)
 
 		case <-c.done:
 			// Drain remaining events with timeout
@@ -193,6 +238,10 @@ func (c *Collector) flush(batch []Event) {
 
 // RecordBatch parses and records a batch of events from JSON.
 func (c *Collector) RecordBatch(sessionID string, data []byte) error {
+	if !validSessionID(sessionID) {
+		return errors.New("invalid session")
+	}
+
 	var events []struct {
 		EventType       string          `json:"event_type"`
 		TrackStem       string          `json:"track_stem,omitempty"`
@@ -207,31 +256,19 @@ func (c *Collector) RecordBatch(sessionID string, data []byte) error {
 		return errors.New("too many events")
 	}
 
+	var rejected int64
 	for _, e := range events {
-		if !validEventTypes[e.EventType] {
+		normalized, ok := normalizeBatchEvent(e)
+		if !ok {
+			rejected++
 			continue
 		}
-		if e.TrackStem != "" && !validTrackStem(e.TrackStem) {
-			continue
-		}
-		if e.PositionSeconds < 0 || e.PositionSeconds > 24*60*60 {
-			continue
-		}
-		if len(e.Metadata) > MaxMetaBytes {
-			continue
-		}
+		normalized.SessionID = sessionID
+		c.Record(normalized)
+	}
 
-		meta := ""
-		if len(e.Metadata) > 0 {
-			meta = string(e.Metadata)
-		}
-		c.Record(Event{
-			SessionID:       sessionID,
-			EventType:       e.EventType,
-			TrackStem:       e.TrackStem,
-			PositionSeconds: e.PositionSeconds,
-			Metadata:        meta,
-		})
+	if rejected > 0 {
+		c.rejected.Add(rejected)
 	}
 
 	return nil
@@ -255,5 +292,182 @@ func validTrackStem(stem string) bool {
 		}
 	}
 
+	return true
+}
+
+func normalizeBatchEvent(raw struct {
+	EventType       string          `json:"event_type"`
+	TrackStem       string          `json:"track_stem,omitempty"`
+	PositionSeconds float64         `json:"position_seconds,omitempty"`
+	Metadata        json.RawMessage `json:"metadata,omitempty"`
+}) (Event, bool) {
+	eventType := strings.TrimSpace(raw.EventType)
+	if !validEventTypes[eventType] {
+		return Event{}, false
+	}
+
+	trackStem := strings.TrimSpace(raw.TrackStem)
+	if trackStem != "" && !validTrackStem(trackStem) {
+		return Event{}, false
+	}
+
+	if raw.PositionSeconds < 0 || raw.PositionSeconds > 24*60*60 {
+		return Event{}, false
+	}
+
+	meta, metaObj, ok := sanitizeMetadata(raw.Metadata)
+	if !ok {
+		return Event{}, false
+	}
+
+	if requiresTrackStem(eventType) && trackStem == "" {
+		return Event{}, false
+	}
+
+	if !validEventByType(eventType, trackStem, raw.PositionSeconds, metaObj) {
+		return Event{}, false
+	}
+
+	if eventType == "session_start" || eventType == "session_end" {
+		trackStem = ""
+	}
+
+	return Event{
+		EventType:       eventType,
+		TrackStem:       trackStem,
+		PositionSeconds: raw.PositionSeconds,
+		Metadata:        meta,
+	}, true
+}
+
+func requiresTrackStem(eventType string) bool {
+	switch eventType {
+	case "play", "pause", "seek", "complete", "dropout":
+		return true
+	default:
+		return false
+	}
+}
+
+func validEventByType(eventType, trackStem string, position float64, metadata map[string]interface{}) bool {
+	switch eventType {
+	case "seek":
+		if !hasNumericField(metadata, "from_position") || !hasNumericField(metadata, "to_position") {
+			return false
+		}
+	case "pause", "dropout":
+		if position <= 0 {
+			return false
+		}
+	case "session_start", "session_end":
+		if trackStem != "" || position != 0 {
+			return false
+		}
+	}
+	return true
+}
+
+func sanitizeMetadata(raw json.RawMessage) (string, map[string]interface{}, bool) {
+	if len(raw) == 0 {
+		return "{}", map[string]interface{}{}, true
+	}
+	if len(raw) > MaxMetaBytes {
+		return "", nil, false
+	}
+
+	dec := json.NewDecoder(bytes.NewReader(raw))
+	dec.UseNumber()
+
+	var parsed interface{}
+	if err := dec.Decode(&parsed); err != nil {
+		return "", nil, false
+	}
+	var extra interface{}
+	if err := dec.Decode(&extra); !errors.Is(err, io.EOF) {
+		return "", nil, false
+	}
+
+	obj, ok := parsed.(map[string]interface{})
+	if !ok {
+		return "", nil, false
+	}
+	if len(obj) > MaxMetaKeys {
+		return "", nil, false
+	}
+	if !validMetadataValue(obj, 0) {
+		return "", nil, false
+	}
+
+	normalized, err := json.Marshal(obj)
+	if err != nil {
+		return "", nil, false
+	}
+	if len(normalized) > MaxMetaBytes {
+		return "", nil, false
+	}
+
+	return string(normalized), obj, true
+}
+
+func validMetadataValue(v interface{}, depth int) bool {
+	if depth > MaxMetaDepth {
+		return false
+	}
+
+	switch val := v.(type) {
+	case map[string]interface{}:
+		if len(val) > MaxMetaKeys {
+			return false
+		}
+		for k, child := range val {
+			if strings.TrimSpace(k) == "" || len(k) > 64 {
+				return false
+			}
+			if !validMetadataValue(child, depth+1) {
+				return false
+			}
+		}
+		return true
+	case []interface{}:
+		if len(val) > MaxMetaKeys {
+			return false
+		}
+		for _, child := range val {
+			if !validMetadataValue(child, depth+1) {
+				return false
+			}
+		}
+		return true
+	case string:
+		return len(val) <= MaxStringSize
+	case json.Number, bool, nil, float64:
+		return true
+	default:
+		return false
+	}
+}
+
+func hasNumericField(obj map[string]interface{}, key string) bool {
+	v, ok := obj[key]
+	if !ok {
+		return false
+	}
+	switch v.(type) {
+	case json.Number, float64:
+		return true
+	default:
+		return false
+	}
+}
+
+func validSessionID(sessionID string) bool {
+	if len(sessionID) != 64 {
+		return false
+	}
+	for _, r := range sessionID {
+		if (r < '0' || r > '9') && (r < 'a' || r > 'f') {
+			return false
+		}
+	}
 	return true
 }

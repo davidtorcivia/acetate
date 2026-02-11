@@ -3,10 +3,12 @@ package auth
 import (
 	"crypto/rand"
 	"crypto/sha256"
+	"crypto/subtle"
 	"database/sql"
 	"encoding/hex"
 	"fmt"
 	"log"
+	"strings"
 	"sync"
 	"time"
 
@@ -18,6 +20,7 @@ const (
 	AdminSessionExpiry = 1 * time.Hour
 	CleanupInterval    = 1 * time.Hour
 	SessionTouchWindow = 1 * time.Minute
+	AdminTouchWindow   = 5 * time.Minute
 )
 
 // SessionStore manages listener and admin sessions in SQLite.
@@ -114,14 +117,23 @@ func (s *SessionStore) DeleteSession(id string) error {
 
 // CreateAdminSession generates a new admin session.
 func (s *SessionStore) CreateAdminSession() (string, error) {
+	return s.CreateAdminSessionWithContext("", "")
+}
+
+// CreateAdminSessionWithContext generates a new admin session bound to coarse client fingerprints.
+func (s *SessionStore) CreateAdminSessionWithContext(ip, userAgent string) (string, error) {
 	id, err := generateSessionID()
 	if err != nil {
 		return "", err
 	}
 
+	now := time.Now().UTC()
+	ipHash := hashIP(strings.TrimSpace(ip), s.salt)
+	uaHash := hashIP(strings.TrimSpace(userAgent), s.salt)
+
 	_, err = s.db.Exec(
-		"INSERT INTO admin_sessions (id, created_at) VALUES (?, ?)",
-		id, time.Now().UTC(),
+		"INSERT INTO admin_sessions (id, created_at, last_seen_at, ip_hash, user_agent_hash) VALUES (?, ?, ?, ?, ?)",
+		id, now, now, ipHash, uaHash,
 	)
 	if err != nil {
 		return "", fmt.Errorf("create admin session: %w", err)
@@ -132,10 +144,18 @@ func (s *SessionStore) CreateAdminSession() (string, error) {
 
 // ValidateAdminSession checks if an admin session is valid (1 hour, no sliding).
 func (s *SessionStore) ValidateAdminSession(id string) (bool, error) {
+	return s.ValidateAdminSessionWithContext(id, "", "")
+}
+
+// ValidateAdminSessionWithContext checks if an admin session is valid and optionally verifies client fingerprints.
+func (s *SessionStore) ValidateAdminSessionWithContext(id, ip, userAgent string) (bool, error) {
 	var createdAt time.Time
+	var lastSeenAt sql.NullTime
+	var storedIPHash sql.NullString
+	var storedUAHash sql.NullString
 	err := s.db.QueryRow(
-		"SELECT created_at FROM admin_sessions WHERE id = ?", id,
-	).Scan(&createdAt)
+		"SELECT created_at, last_seen_at, ip_hash, user_agent_hash FROM admin_sessions WHERE id = ?", id,
+	).Scan(&createdAt, &lastSeenAt, &storedIPHash, &storedUAHash)
 	if err == sql.ErrNoRows {
 		return false, nil
 	}
@@ -148,6 +168,28 @@ func (s *SessionStore) ValidateAdminSession(id string) (bool, error) {
 			return false, fmt.Errorf("delete expired admin session: %w", err)
 		}
 		return false, nil
+	}
+
+	if strings.TrimSpace(ip) != "" && storedIPHash.Valid && storedIPHash.String != "" {
+		reqIPHash := hashIP(strings.TrimSpace(ip), s.salt)
+		if !secureHashEqual(storedIPHash.String, reqIPHash) {
+			_, _ = s.db.Exec("DELETE FROM admin_sessions WHERE id = ?", id)
+			return false, nil
+		}
+	}
+
+	if strings.TrimSpace(userAgent) != "" && storedUAHash.Valid && storedUAHash.String != "" {
+		reqUAHash := hashIP(strings.TrimSpace(userAgent), s.salt)
+		if !secureHashEqual(storedUAHash.String, reqUAHash) {
+			_, _ = s.db.Exec("DELETE FROM admin_sessions WHERE id = ?", id)
+			return false, nil
+		}
+	}
+
+	if !lastSeenAt.Valid || time.Since(lastSeenAt.Time.UTC()) >= AdminTouchWindow {
+		if _, err := s.db.Exec("UPDATE admin_sessions SET last_seen_at = ? WHERE id = ?", time.Now().UTC(), id); err != nil {
+			return false, fmt.Errorf("touch admin session: %w", err)
+		}
 	}
 
 	return true, nil
@@ -202,4 +244,8 @@ func generateSessionID() (string, error) {
 func hashIP(ip, salt string) string {
 	h := sha256.Sum256([]byte(salt + ip))
 	return hex.EncodeToString(h[:])
+}
+
+func secureHashEqual(a, b string) bool {
+	return subtle.ConstantTimeCompare([]byte(a), []byte(b)) == 1
 }

@@ -5,6 +5,7 @@ import (
 	"log"
 	"os"
 	"os/signal"
+	"strconv"
 	"syscall"
 	"time"
 
@@ -19,8 +20,11 @@ func main() {
 	albumPath := envOr("ALBUM_PATH", "./album")
 	dataPath := envOr("DATA_PATH", "./data")
 	adminToken := os.Getenv("ADMIN_TOKEN")
+	adminTokenHash := os.Getenv("ADMIN_TOKEN_HASH")
+	analyticsRetentionDays := envInt("ANALYTICS_RETENTION_DAYS", 0)
+	maintenanceInterval := envDuration("ANALYTICS_MAINTENANCE_INTERVAL", 12*time.Hour)
 
-	if adminToken == "" {
+	if adminToken == "" && adminTokenHash == "" {
 		log.Println("WARNING: ADMIN_TOKEN not set — admin interface disabled")
 	}
 
@@ -50,12 +54,15 @@ func main() {
 
 	// Create and start server
 	srv := server.New(server.Config{
-		ListenAddr: listenAddr,
-		AlbumPath:  albumPath,
-		DataPath:   dataPath,
-		AdminToken: adminToken,
-		DB:         db,
-		ConfigMgr:  cfgMgr,
+		ListenAddr:             listenAddr,
+		AlbumPath:              albumPath,
+		DataPath:               dataPath,
+		AdminToken:             adminToken,
+		AdminTokenHash:         adminTokenHash,
+		AnalyticsRetentionDays: analyticsRetentionDays,
+		MaintenanceInterval:    maintenanceInterval,
+		DB:                     db,
+		ConfigMgr:              cfgMgr,
 	})
 
 	// Graceful shutdown
@@ -91,4 +98,30 @@ func envOr(key, fallback string) string {
 		return v
 	}
 	return fallback
+}
+
+func envInt(key string, fallback int) int {
+	raw := os.Getenv(key)
+	if raw == "" {
+		return fallback
+	}
+	v, err := strconv.Atoi(raw)
+	if err != nil {
+		log.Printf("WARNING: invalid %s=%q, using %d", key, raw, fallback)
+		return fallback
+	}
+	return v
+}
+
+func envDuration(key string, fallback time.Duration) time.Duration {
+	raw := os.Getenv(key)
+	if raw == "" {
+		return fallback
+	}
+	v, err := time.ParseDuration(raw)
+	if err != nil {
+		log.Printf("WARNING: invalid %s=%q, using %s", key, raw, fallback)
+		return fallback
+	}
+	return v
 }

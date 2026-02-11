@@ -51,7 +51,9 @@ func (s *Server) requireAdmin(next http.Handler) http.Handler {
 			return
 		}
 
-		valid, err := s.sessions.ValidateAdminSession(cookie.Value)
+		clientIP := s.cfIPs.GetClientIP(r)
+		userAgent := strings.TrimSpace(r.UserAgent())
+		valid, err := s.sessions.ValidateAdminSessionWithContext(cookie.Value, clientIP, userAgent)
 		if err != nil {
 			log.Printf("admin session validate error: %v", err)
 			jsonError(w, "internal error", http.StatusInternalServerError)

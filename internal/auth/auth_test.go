@@ -102,6 +102,31 @@ func TestAdminSession(t *testing.T) {
 	}
 }
 
+func TestAdminSessionFingerprintBinding(t *testing.T) {
+	store := testDB(t)
+
+	id, err := store.CreateAdminSessionWithContext("127.0.0.1", "test-agent")
+	if err != nil {
+		t.Fatalf("CreateAdminSessionWithContext: %v", err)
+	}
+
+	valid, err := store.ValidateAdminSessionWithContext(id, "127.0.0.1", "test-agent")
+	if err != nil {
+		t.Fatalf("ValidateAdminSessionWithContext: %v", err)
+	}
+	if !valid {
+		t.Fatal("session should validate for same fingerprint")
+	}
+
+	valid, err = store.ValidateAdminSessionWithContext(id, "127.0.0.2", "test-agent")
+	if err != nil {
+		t.Fatalf("ValidateAdminSessionWithContext mismatch: %v", err)
+	}
+	if valid {
+		t.Fatal("session should be invalid for mismatched fingerprint")
+	}
+}
+
 func TestVerifyPassphrase(t *testing.T) {
 	hash, _ := bcrypt.GenerateFromPassword([]byte("testpass"), bcrypt.DefaultCost)
 
