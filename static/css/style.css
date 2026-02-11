@@ -31,8 +31,9 @@
 :root {
     --bg: #0a0908;
     --text: #d4cfc4;
-    --text-dim: rgba(212, 207, 196, 0.4);
+    --text-dim: rgba(212, 207, 196, 0.56);
     --accent: #8a7a5a;
+    --focus: #b69f74;
     --border: rgba(255, 255, 255, 0.06);
     --serif: 'EB Garamond', Georgia, 'Times New Roman', serif;
     --sans: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
@@ -46,6 +47,15 @@ html, body {
     font-family: var(--sans);
     -webkit-font-smoothing: antialiased;
     -moz-osx-font-smoothing: grayscale;
+}
+
+button:focus-visible,
+input:focus-visible,
+[tabindex]:focus-visible,
+.tracklist li:focus-visible,
+.lyrics .line-group.timed:focus-visible {
+    outline: 2px solid var(--focus);
+    outline-offset: 2px;
 }
 
 /* subtle noise texture */
@@ -162,7 +172,7 @@ body::after {
     display: flex;
     flex-direction: column;
     align-items: center;
-    padding: 48px 24px 24px;
+    padding: 48px 24px max(16px, env(safe-area-inset-bottom));
     overflow: hidden;
 }
 
@@ -211,10 +221,22 @@ body::after {
     overflow-y: auto;
     overflow-x: hidden;
     position: relative;
+    overscroll-behavior: contain;
+    -webkit-overflow-scrolling: touch;
+    scroll-padding-top: 96px;
+    scroll-padding-bottom: 160px;
     mask-image: linear-gradient(to bottom, transparent 0%, black 8%, black 92%, transparent 100%);
     -webkit-mask-image: linear-gradient(to bottom, transparent 0%, black 8%, black 92%, transparent 100%);
     -ms-overflow-style: none;
     scrollbar-width: none;
+}
+
+.lyrics-container.hidden-by-shortcut {
+    display: none;
+}
+
+#player.lyrics-hidden .tracklist {
+    max-height: 260px;
 }
 
 .lyrics {
@@ -241,6 +263,10 @@ body::after {
 
 .lyrics .line-group {
     padding: 1px 0;
+}
+
+.lyrics .line-group.timed {
+    cursor: pointer;
 }
 
 .lyrics .section-label {
@@ -294,7 +320,8 @@ body::after {
 .controls {
     width: 100%;
     flex-shrink: 0;
-    padding: 12px 0;
+    padding: 12px 0 8px;
+    z-index: 3;
 }
 
 .control-buttons {
@@ -311,9 +338,12 @@ body::after {
     color: var(--text-dim);
     font-size: 1rem;
     cursor: pointer;
+    min-width: 44px;
+    min-height: 44px;
     padding: 8px;
     transition: color 0.2s ease;
     line-height: 1;
+    touch-action: manipulation;
 }
 
 .control-btn:hover {
@@ -427,14 +457,19 @@ body::after {
 
 /* Track list */
 .tracklist-toggle {
+    width: 100%;
+    background: none;
+    border: none;
     font-family: var(--sans);
     font-size: 0.8rem;
     color: var(--text-dim);
     cursor: pointer;
+    min-height: 44px;
     padding: 12px 0 4px;
     text-align: center;
     user-select: none;
     flex-shrink: 0;
+    touch-action: manipulation;
 }
 
 .tracklist-toggle:hover {
@@ -471,7 +506,7 @@ body::after {
 .tracklist li {
     font-family: var(--serif);
     font-size: 0.95rem;
-    padding: 8px 12px;
+    padding: 10px 12px;
     cursor: pointer;
     color: var(--text-dim);
     transition: color 0.2s ease;
@@ -481,6 +516,10 @@ body::after {
 }
 
 .tracklist li:hover {
+    color: var(--text);
+}
+
+.tracklist li:focus-visible {
     color: var(--text);
 }
 
@@ -522,9 +561,31 @@ body::after {
 }
 
 /* === Responsive === */
+@media (max-width: 768px) {
+    .controls {
+        position: sticky;
+        bottom: 0;
+        margin-top: 10px;
+        padding: 12px 0 calc(10px + env(safe-area-inset-bottom));
+        background: linear-gradient(to top, rgba(10, 9, 8, 0.95) 65%, rgba(10, 9, 8, 0));
+        backdrop-filter: blur(6px);
+    }
+
+    .lyrics-container {
+        width: calc(100% + 6px);
+        margin-right: -6px;
+        padding-right: 6px;
+        scroll-padding-bottom: 180px;
+    }
+
+    .tracklist li {
+        padding: 12px 12px;
+    }
+}
+
 @media (max-width: 480px) {
     .player-inner {
-        padding: 32px 16px 16px;
+        padding: 32px 16px max(12px, env(safe-area-inset-bottom));
     }
 
     .gate-inner {
@@ -643,6 +704,17 @@ body::after {
         text-align: left;
         padding: 70px 24px;
         font-size: 1.22rem;
+    }
+
+    #player.lyrics-hidden .player-inner {
+        max-width: 760px;
+        grid-template-columns: minmax(380px, 1fr);
+        grid-template-areas:
+            "cover"
+            "scope"
+            "title"
+            "controls"
+            "tracklist";
     }
 }
 

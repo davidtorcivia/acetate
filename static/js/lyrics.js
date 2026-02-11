@@ -7,16 +7,21 @@
     var lrcData = null;     // parsed LRC: [{time, lines}]
     var activeIndex = -1;
     var lrcGroups = [];
+    var lyricsVisible = true;
     var HIGHLIGHT_LEAD_SECONDS = 0.17;
 
     window.AcetateLyrics = {
         load: load,
-        update: update
+        update: update,
+        toggleVisibility: toggleVisibility,
+        setVisible: setVisible,
+        isVisible: function () { return lyricsVisible; }
     };
 
     function init() {
         container = document.getElementById('lyrics-container');
         lyricsEl = document.getElementById('lyrics');
+        setVisible(true);
     }
 
     function load(stem, format) {
@@ -313,6 +318,13 @@
                 group.classList.add('section-break');
             }
             group.dataset.index = i;
+            group.dataset.time = String(entry.time || 0);
+            group.classList.add('timed');
+            group.tabIndex = 0;
+            group.setAttribute('role', 'button');
+            group.setAttribute('aria-label', 'Seek lyrics to ' + formatTimeLabel(entry.time));
+            group.addEventListener('click', onLineGroupActivate);
+            group.addEventListener('keydown', onLineGroupKeydown);
 
             if (entry.sectionLabel) {
                 var label = document.createElement('div');
@@ -436,6 +448,47 @@
         }
 
         return idx;
+    }
+
+    function onLineGroupActivate(e) {
+        var group = e.currentTarget;
+        if (!group || !group.dataset) return;
+        var time = parseFloat(group.dataset.time);
+        if (isNaN(time) || time < 0) return;
+
+        if (typeof window.AcetatePlayer !== 'undefined' && typeof window.AcetatePlayer.seekTo === 'function') {
+            window.AcetatePlayer.seekTo(time, true);
+        }
+    }
+
+    function onLineGroupKeydown(e) {
+        if (e.key === 'Enter' || e.key === ' ') {
+            e.preventDefault();
+            onLineGroupActivate(e);
+        }
+    }
+
+    function toggleVisibility() {
+        setVisible(!lyricsVisible);
+    }
+
+    function setVisible(visible) {
+        lyricsVisible = !!visible;
+        if (!container) return;
+
+        container.classList.toggle('hidden-by-shortcut', !lyricsVisible);
+        container.setAttribute('aria-hidden', lyricsVisible ? 'false' : 'true');
+        var player = document.getElementById('player');
+        if (player) {
+            player.classList.toggle('lyrics-hidden', !lyricsVisible);
+        }
+    }
+
+    function formatTimeLabel(seconds) {
+        var total = Math.max(0, Math.floor(seconds || 0));
+        var mins = Math.floor(total / 60);
+        var secs = total % 60;
+        return mins + ':' + (secs < 10 ? '0' : '') + secs;
     }
 
     function encodePathSegment(value) {

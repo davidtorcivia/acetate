@@ -19,7 +19,11 @@
                 var expanded = container.classList.toggle('expanded');
                 container.classList.toggle('collapsed', !expanded);
                 toggle.classList.toggle('open', expanded);
+                toggle.setAttribute('aria-expanded', expanded ? 'true' : 'false');
             });
+
+            var expandedInitially = container && container.classList.contains('expanded');
+            toggle.setAttribute('aria-expanded', expandedInitially ? 'true' : 'false');
         }
     }
 
@@ -41,10 +45,20 @@
 
             li.appendChild(num);
             li.appendChild(title);
+            li.tabIndex = 0;
+            li.setAttribute('role', 'button');
+            li.setAttribute('aria-label', 'Play ' + track.title);
 
             li.addEventListener('click', function () {
                 AcetatePlayer.loadTrack(index);
                 AcetatePlayer.play();
+            });
+            li.addEventListener('keydown', function (e) {
+                if (e.key === 'Enter' || e.key === ' ') {
+                    e.preventDefault();
+                    AcetatePlayer.loadTrack(index);
+                    AcetatePlayer.play();
+                }
             });
 
             items.appendChild(li);
@@ -55,7 +69,13 @@
         if (!items) return;
         var lis = items.querySelectorAll('li');
         lis.forEach(function (li) {
-            li.classList.toggle('active', parseInt(li.dataset.index) === index);
+            var isActive = parseInt(li.dataset.index, 10) === index;
+            li.classList.toggle('active', isActive);
+            if (isActive) {
+                li.setAttribute('aria-current', 'true');
+            } else {
+                li.removeAttribute('aria-current');
+            }
         });
     }
 

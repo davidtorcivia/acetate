@@ -25,20 +25,20 @@
     <!-- Player -->
     <div id="player" class="screen">
         <div class="player-inner">
-            <img id="cover" class="cover" alt="" draggable="false">
+            <img id="cover" class="cover" alt="Album cover" draggable="false">
             <canvas id="oscilloscope"></canvas>
-            <div id="track-title" class="track-title"></div>
-            <div id="lyrics-container" class="lyrics-container">
+            <div id="track-title" class="track-title" aria-live="polite"></div>
+            <div id="lyrics-container" class="lyrics-container" aria-label="Lyrics" tabindex="0">
                 <div id="lyrics" class="lyrics"></div>
             </div>
             <div class="controls">
                 <div class="control-buttons">
-                    <button id="btn-prev" class="control-btn" aria-label="Previous">&#x25C1;&#x25C1;</button>
+                    <button id="btn-prev" class="control-btn" aria-label="Previous track">&#x25C1;&#x25C1;</button>
                     <button id="btn-play" class="control-btn control-btn-main" aria-label="Play">&#x25B7;</button>
-                    <button id="btn-next" class="control-btn" aria-label="Next">&#x25B7;&#x25B7;</button>
+                    <button id="btn-next" class="control-btn" aria-label="Next track">&#x25B7;&#x25B7;</button>
                 </div>
                 <div class="progress-container">
-                    <input type="range" id="progress" class="progress" min="0" max="100" step="0.1" value="0">
+                    <input type="range" id="progress" class="progress" min="0" max="100" step="0.1" value="0" aria-label="Playback position">
                     <div class="progress-times">
                         <span id="time-current">0:00</span>
                         <span id="time-total">0:00</span>
@@ -49,10 +49,10 @@
                     <input type="range" id="volume" class="volume" min="0" max="1" step="0.01" value="1" aria-label="Volume">
                 </div>
             </div>
-            <div class="tracklist-toggle" id="tracklist-toggle">
+            <button id="tracklist-toggle" class="tracklist-toggle" type="button" aria-expanded="false" aria-controls="tracklist">
                 <span class="tracklist-arrow">&#x25BD;</span> Track List
-            </div>
-            <div id="tracklist" class="tracklist collapsed">
+            </button>
+            <div id="tracklist" class="tracklist collapsed" aria-label="Track list">
                 <ol id="tracklist-items"></ol>
             </div>
         </div>
