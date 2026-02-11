@@ -1,0 +1,68 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+    <meta name="theme-color" content="#0a0908">
+    <meta name="description" content="A listening room.">
+    <meta name="apple-mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+    <title>Acetate</title>
+    <link rel="manifest" href="/manifest.json">
+    <link rel="stylesheet" href="/css/style.css">
+    <link rel="preload" href="/fonts/eb-garamond-v27-latin-regular.woff2" as="font" type="font/woff2" crossorigin>
+    <link rel="preload" href="/fonts/inter-v13-latin-regular.woff2" as="font" type="font/woff2" crossorigin>
+</head>
+<body>
+    <!-- Gate -->
+    <div id="gate" class="screen active">
+        <div class="gate-inner">
+            <input type="password" id="passphrase" autocomplete="off" spellcheck="false" autofocus>
+        </div>
+    </div>
+
+    <!-- Player -->
+    <div id="player" class="screen">
+        <div class="player-inner">
+            <img id="cover" class="cover" alt="" draggable="false">
+            <canvas id="oscilloscope"></canvas>
+            <div id="track-title" class="track-title"></div>
+            <div id="lyrics-container" class="lyrics-container">
+                <div id="lyrics" class="lyrics"></div>
+            </div>
+            <div class="controls">
+                <div class="control-buttons">
+                    <button id="btn-prev" class="control-btn" aria-label="Previous">&#x25C1;&#x25C1;</button>
+                    <button id="btn-play" class="control-btn control-btn-main" aria-label="Play">&#x25B7;</button>
+                    <button id="btn-next" class="control-btn" aria-label="Next">&#x25B7;&#x25B7;</button>
+                </div>
+                <div class="progress-container">
+                    <input type="range" id="progress" class="progress" min="0" max="100" step="0.1" value="0">
+                    <div class="progress-times">
+                        <span id="time-current">0:00</span>
+                        <span id="time-total">0:00</span>
+                    </div>
+                </div>
+            </div>
+            <div class="tracklist-toggle" id="tracklist-toggle">
+                <span class="tracklist-arrow">&#x25BD;</span> Track List
+            </div>
+            <div id="tracklist" class="tracklist collapsed">
+                <ol id="tracklist-items"></ol>
+            </div>
+        </div>
+    </div>
+
+    <!-- Audio elements (double-deck for gapless) -->
+    <audio id="audio-a" preload="auto"></audio>
+    <audio id="audio-b" preload="auto"></audio>
+
+    <script src="/js/app.js"></script>
+    <script src="/js/gate.js"></script>
+    <script src="/js/player.js"></script>
+    <script src="/js/tracklist.js"></script>
+    <script src="/js/oscilloscope.js"></script>
+    <script src="/js/lyrics.js"></script>
+    <script src="/js/analytics.js"></script>
+</body>
+</html>

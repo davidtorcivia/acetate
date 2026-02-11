@@ -1,0 +1,123 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Acetate Admin</title>
+    <link rel="stylesheet" href="/admin/admin.css">
+</head>
+<body>
+    <!-- Login -->
+    <div id="admin-login" class="panel">
+        <h1>Acetate Admin</h1>
+        <form id="login-form">
+            <input type="password" id="admin-token" placeholder="Admin token" autocomplete="off">
+            <button type="submit">Login</button>
+        </form>
+        <div id="login-error" class="error hidden"></div>
+    </div>
+
+    <!-- Dashboard -->
+    <div id="admin-dashboard" class="hidden">
+        <header>
+            <h1>Acetate Admin</h1>
+            <button id="btn-logout" class="btn-small">Logout</button>
+        </header>
+
+        <!-- Config Section -->
+        <section id="section-config" class="section">
+            <h2>Configuration</h2>
+            <div class="config-grid">
+                <div class="config-item">
+                    <label>Title</label>
+                    <span id="cfg-title"></span>
+                </div>
+                <div class="config-item">
+                    <label>Artist</label>
+                    <span id="cfg-artist"></span>
+                </div>
+                <div class="config-item">
+                    <label>Password</label>
+                    <span id="cfg-password"></span>
+                </div>
+                <div class="config-item">
+                    <label>Tracks</label>
+                    <span id="cfg-tracks"></span>
+                </div>
+            </div>
+        </section>
+
+        <!-- Password Section -->
+        <section id="section-password" class="section">
+            <h2>Update Password</h2>
+            <form id="password-form" class="inline-form">
+                <input type="password" id="new-password" placeholder="New passphrase">
+                <button type="submit">Update</button>
+            </form>
+            <div id="password-status" class="status hidden"></div>
+        </section>
+
+        <!-- Cover Section -->
+        <section id="section-cover" class="section">
+            <h2>Cover Art</h2>
+            <form id="cover-form" class="inline-form">
+                <input type="file" id="cover-file" accept="image/jpeg,image/png">
+                <button type="submit">Upload</button>
+            </form>
+            <div id="cover-status" class="status hidden"></div>
+        </section>
+
+        <!-- Tracks Section -->
+        <section id="section-tracks" class="section">
+            <h2>Track Order</h2>
+            <div class="track-meta-form">
+                <div class="field">
+                    <label for="album-title">Album Title</label>
+                    <input type="text" id="album-title">
+                </div>
+                <div class="field">
+                    <label for="album-artist">Artist</label>
+                    <input type="text" id="album-artist">
+                </div>
+            </div>
+            <div id="track-list" class="track-list"></div>
+            <button id="btn-save-tracks" class="btn-primary">Save Track Order</button>
+            <div id="tracks-status" class="status hidden"></div>
+        </section>
+
+        <!-- Analytics Section -->
+        <section id="section-analytics" class="section">
+            <h2>Analytics</h2>
+            <div id="analytics-overview" class="analytics-overview"></div>
+            <h3>Per-Track Stats</h3>
+            <table id="track-stats-table" class="data-table">
+                <thead>
+                    <tr>
+                        <th>Track</th>
+                        <th>Plays</th>
+                        <th>Sessions</th>
+                        <th>Completions</th>
+                        <th>Rate</th>
+                        <th>Dropout Heatmap</th>
+                    </tr>
+                </thead>
+                <tbody id="track-stats-body"></tbody>
+            </table>
+            <h3>Recent Sessions</h3>
+            <table id="sessions-table" class="data-table">
+                <thead>
+                    <tr>
+                        <th>Started</th>
+                        <th>Last Seen</th>
+                        <th>Tracks Heard</th>
+                        <th>IP Hash</th>
+                    </tr>
+                </thead>
+                <tbody id="sessions-body"></tbody>
+            </table>
+        </section>
+    </div>
+
+    <script src="/admin/admin.js"></script>
+</body>
+</html>

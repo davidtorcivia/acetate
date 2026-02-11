@@ -1,0 +1,17 @@
+{
+    "name": "Acetate",
+    "short_name": "Acetate",
+    "description": "A listening room.",
+    "start_url": "/",
+    "display": "standalone",
+    "background_color": "#0a0908",
+    "theme_color": "#0a0908",
+    "icons": [
+        {
+            "src": "/api/cover",
+            "sizes": "512x512",
+            "type": "image/jpeg",
+            "purpose": "any"
+        }
+    ]
+}

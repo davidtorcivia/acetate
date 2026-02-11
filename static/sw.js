@@ -1,0 +1,98 @@
+// Acetate — Service Worker
+const CACHE_NAME = 'acetate-static-v1';
+const AUDIO_CACHE = 'acetate-audio-v1';
+
+const STATIC_ASSETS = [
+    '/',
+    '/index.html',
+    '/css/style.css',
+    '/js/app.js',
+    '/js/gate.js',
+    '/js/player.js',
+    '/js/tracklist.js',
+    '/js/oscilloscope.js',
+    '/js/lyrics.js',
+    '/js/analytics.js',
+    '/manifest.json'
+];
+
+// Install — cache static assets
+self.addEventListener('install', function (event) {
+    event.waitUntil(
+        caches.open(CACHE_NAME).then(function (cache) {
+            return cache.addAll(STATIC_ASSETS);
+        })
+    );
+    self.skipWaiting();
+});
+
+// Activate — clean old caches
+self.addEventListener('activate', function (event) {
+    event.waitUntil(
+        caches.keys().then(function (keys) {
+            return Promise.all(
+                keys.filter(function (key) {
+                    return key !== CACHE_NAME && key !== AUDIO_CACHE;
+                }).map(function (key) {
+                    return caches.delete(key);
+                })
+            );
+        })
+    );
+    self.clients.claim();
+});
+
+// Fetch — strategy based on request type
+self.addEventListener('fetch', function (event) {
+    var url = new URL(event.request.url);
+
+    // MP3 streaming — cache current + next track only (whole file)
+    if (url.pathname.startsWith('/api/stream/')) {
+        event.respondWith(
+            caches.open(AUDIO_CACHE).then(function (cache) {
+                return cache.match(event.request).then(function (cached) {
+                    if (cached) return cached;
+
+                    return fetch(event.request).then(function (response) {
+                        // Only cache successful full responses (not 206 partials)
+                        if (response.ok && response.status === 200) {
+                            cache.put(event.request, response.clone());
+
+                            // Evict old entries — keep max 2 tracks
+                            cache.keys().then(function (keys) {
+                                if (keys.length > 2) {
+                                    cache.delete(keys[0]);
+                                }
+                            });
+                        }
+                        return response;
+                    });
+                });
+            })
+        );
+        return;
+    }
+
+    // Static assets — cache first, network fallback
+    if (STATIC_ASSETS.indexOf(url.pathname) !== -1 ||
+        url.pathname.startsWith('/css/') ||
+        url.pathname.startsWith('/js/') ||
+        url.pathname.startsWith('/fonts/')) {
+        event.respondWith(
+            caches.match(event.request).then(function (cached) {
+                return cached || fetch(event.request).then(function (response) {
+                    if (response.ok) {
+                        var cache = caches.open(CACHE_NAME).then(function (c) {
+                            c.put(event.request, response.clone());
+                        });
+                    }
+                    return response;
+                });
+            })
+        );
+        return;
+    }
+
+    // API requests — network only
+    event.respondWith(fetch(event.request));
+});

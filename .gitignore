@@ -1,0 +1,24 @@
+# Data directory (mutable state)
+data/
+
+# Album directory (user content)
+album/
+
+# Go binaries
+*.exe
+acetate
+hashpass
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Test artifacts
+*.test
+coverage.out

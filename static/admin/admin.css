@@ -1,0 +1,261 @@
+* { margin: 0; padding: 0; box-sizing: border-box; }
+
+body {
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
+    background: #1a1a1a;
+    color: #e0e0e0;
+    line-height: 1.5;
+    padding: 20px;
+    max-width: 960px;
+    margin: 0 auto;
+}
+
+h1 { font-size: 1.5rem; font-weight: 600; margin-bottom: 16px; }
+h2 { font-size: 1.1rem; font-weight: 600; margin-bottom: 12px; color: #ccc; }
+h3 { font-size: 0.95rem; font-weight: 500; margin: 20px 0 8px; color: #aaa; }
+
+header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 24px;
+    padding-bottom: 16px;
+    border-bottom: 1px solid #333;
+}
+
+.hidden { display: none !important; }
+
+/* Panel (login) */
+.panel {
+    max-width: 320px;
+    margin: 100px auto;
+    text-align: center;
+}
+
+.panel form {
+    display: flex;
+    gap: 8px;
+    margin-top: 16px;
+}
+
+/* Forms & Inputs */
+input[type="text"],
+input[type="password"] {
+    background: #2a2a2a;
+    border: 1px solid #444;
+    color: #e0e0e0;
+    padding: 8px 12px;
+    border-radius: 4px;
+    font-size: 0.9rem;
+    flex: 1;
+}
+
+input[type="text"]:focus,
+input[type="password"]:focus {
+    outline: none;
+    border-color: #666;
+}
+
+input[type="file"] {
+    font-size: 0.85rem;
+    color: #aaa;
+}
+
+button {
+    background: #333;
+    border: 1px solid #555;
+    color: #e0e0e0;
+    padding: 8px 16px;
+    border-radius: 4px;
+    cursor: pointer;
+    font-size: 0.85rem;
+    white-space: nowrap;
+}
+
+button:hover { background: #444; }
+
+.btn-primary {
+    background: #4a5a3a;
+    border-color: #5a6a4a;
+}
+
+.btn-primary:hover { background: #5a6a4a; }
+
+.btn-small {
+    padding: 4px 12px;
+    font-size: 0.8rem;
+}
+
+.inline-form {
+    display: flex;
+    gap: 8px;
+    align-items: center;
+}
+
+/* Sections */
+.section {
+    margin-bottom: 32px;
+    padding: 16px;
+    background: #222;
+    border-radius: 6px;
+}
+
+/* Config grid */
+.config-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 12px;
+}
+
+.config-item label {
+    display: block;
+    font-size: 0.75rem;
+    color: #888;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    margin-bottom: 2px;
+}
+
+.config-item span {
+    font-size: 0.9rem;
+}
+
+/* Track list (drag and drop) */
+.track-list {
+    margin: 12px 0;
+}
+
+.track-item {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    padding: 8px 12px;
+    background: #2a2a2a;
+    border: 1px solid #333;
+    border-radius: 4px;
+    margin-bottom: 4px;
+    cursor: grab;
+}
+
+.track-item:active { cursor: grabbing; }
+
+.track-item.dragging {
+    opacity: 0.5;
+    border-color: #666;
+}
+
+.track-item .drag-handle {
+    color: #555;
+    cursor: grab;
+    font-size: 1.2rem;
+}
+
+.track-item .track-stem {
+    font-family: monospace;
+    font-size: 0.8rem;
+    color: #888;
+    min-width: 120px;
+}
+
+.track-item input {
+    flex: 1;
+}
+
+.track-item .track-display-idx {
+    width: 60px;
+    text-align: center;
+}
+
+.track-meta-form {
+    display: flex;
+    gap: 12px;
+    margin-bottom: 12px;
+}
+
+.track-meta-form .field {
+    flex: 1;
+}
+
+.track-meta-form label {
+    display: block;
+    font-size: 0.75rem;
+    color: #888;
+    margin-bottom: 4px;
+}
+
+/* Data tables */
+.data-table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 0.85rem;
+}
+
+.data-table th {
+    text-align: left;
+    padding: 8px;
+    border-bottom: 1px solid #444;
+    font-weight: 500;
+    color: #aaa;
+    font-size: 0.8rem;
+}
+
+.data-table td {
+    padding: 8px;
+    border-bottom: 1px solid #2a2a2a;
+}
+
+/* Analytics overview */
+.analytics-overview {
+    display: flex;
+    gap: 24px;
+    margin-bottom: 16px;
+}
+
+.stat-card {
+    flex: 1;
+    text-align: center;
+}
+
+.stat-card .stat-value {
+    font-size: 1.5rem;
+    font-weight: 600;
+    color: #fff;
+}
+
+.stat-card .stat-label {
+    font-size: 0.75rem;
+    color: #888;
+    text-transform: uppercase;
+}
+
+/* Heatmap (inline SVG) */
+.heatmap {
+    display: inline-flex;
+    gap: 1px;
+    vertical-align: middle;
+}
+
+.heatmap-bin {
+    width: 16px;
+    height: 16px;
+    border-radius: 2px;
+}
+
+/* Status messages */
+.status {
+    font-size: 0.8rem;
+    margin-top: 8px;
+    padding: 4px 0;
+}
+
+.status.success { color: #6a9a4a; }
+.status.error { color: #9a4a4a; }
+
+.error { color: #9a4a4a; font-size: 0.85rem; margin-top: 8px; }
+
+@media (max-width: 640px) {
+    .config-grid { grid-template-columns: 1fr; }
+    .analytics-overview { flex-direction: column; gap: 12px; }
+    .data-table { font-size: 0.8rem; }
+    .track-meta-form { flex-direction: column; }
+}
