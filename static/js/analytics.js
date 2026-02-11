@@ -5,6 +5,7 @@
     var buffer = [];
     var flushInterval = 10000;  // 10 seconds
     var heartbeatInterval = 30000; // 30 seconds
+    var maxBufferSize = 5000;
     var flushTimer = null;
     var heartbeatTimer = null;
 
@@ -66,6 +67,14 @@
                 event.metadata = {};
             }
         }
+
+        if (buffer.length >= maxBufferSize) {
+            if (eventType === 'play' || eventType === 'complete' || eventType === 'session_start' || eventType === 'session_end') {
+                buffer.shift();
+            } else {
+                return;
+            }
+        }
         buffer.push(event);
     }
 
@@ -83,6 +92,9 @@
         }).catch(function () {
             // Put events back on failure
             buffer = events.concat(buffer);
+            if (buffer.length > maxBufferSize) {
+                buffer = buffer.slice(buffer.length - maxBufferSize);
+            }
         });
     }
 

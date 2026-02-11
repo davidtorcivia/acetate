@@ -6,6 +6,8 @@ import (
 	"database/sql"
 	"encoding/hex"
 	"fmt"
+	"log"
+	"sync"
 	"time"
 
 	"golang.org/x/crypto/bcrypt"
@@ -15,6 +17,7 @@ const (
 	SessionExpiry      = 7 * 24 * time.Hour
 	AdminSessionExpiry = 1 * time.Hour
 	CleanupInterval    = 1 * time.Hour
+	SessionTouchWindow = 1 * time.Minute
 )
 
 // SessionStore manages listener and admin sessions in SQLite.
@@ -22,13 +25,18 @@ type SessionStore struct {
 	db   *sql.DB
 	salt string
 	done chan struct{}
+	once sync.Once
 }
 
 // NewSessionStore creates a session store and starts the cleanup goroutine.
 func NewSessionStore(db *sql.DB) *SessionStore {
 	// Generate a random salt for IP hashing
 	saltBytes := make([]byte, 16)
-	rand.Read(saltBytes)
+	if _, err := rand.Read(saltBytes); err != nil {
+		// Extremely rare; keep startup non-fatal and continue with a best-effort salt.
+		fallback := sha256.Sum256([]byte(time.Now().UTC().Format(time.RFC3339Nano)))
+		copy(saltBytes, fallback[:16])
+	}
 
 	s := &SessionStore{
 		db:   db,
@@ -41,7 +49,9 @@ func NewSessionStore(db *sql.DB) *SessionStore {
 
 // Close stops the cleanup goroutine.
 func (s *SessionStore) Close() {
-	close(s.done)
+	s.once.Do(func() {
+		close(s.done)
+	})
 }
 
 // CreateSession generates a new listener session and stores it.
@@ -79,13 +89,20 @@ func (s *SessionStore) ValidateSession(id string) (bool, error) {
 		return false, fmt.Errorf("query session: %w", err)
 	}
 
-	if time.Since(lastSeen) > SessionExpiry {
-		s.db.Exec("DELETE FROM sessions WHERE id = ?", id)
+	now := time.Now().UTC()
+	if now.Sub(lastSeen.UTC()) > SessionExpiry {
+		if _, err := s.db.Exec("DELETE FROM sessions WHERE id = ?", id); err != nil {
+			return false, fmt.Errorf("delete expired session: %w", err)
+		}
 		return false, nil
 	}
 
-	// Update sliding window
-	s.db.Exec("UPDATE sessions SET last_seen_at = ? WHERE id = ?", time.Now().UTC(), id)
+	// Update sliding window at most once per minute to reduce write amplification.
+	if now.Sub(lastSeen.UTC()) >= SessionTouchWindow {
+		if _, err := s.db.Exec("UPDATE sessions SET last_seen_at = ? WHERE id = ?", now, id); err != nil {
+			return false, fmt.Errorf("touch session: %w", err)
+		}
+	}
 	return true, nil
 }
 
@@ -127,7 +144,9 @@ func (s *SessionStore) ValidateAdminSession(id string) (bool, error) {
 	}
 
 	if time.Since(createdAt) > AdminSessionExpiry {
-		s.db.Exec("DELETE FROM admin_sessions WHERE id = ?", id)
+		if _, err := s.db.Exec("DELETE FROM admin_sessions WHERE id = ?", id); err != nil {
+			return false, fmt.Errorf("delete expired admin session: %w", err)
+		}
 		return false, nil
 	}
 
@@ -162,10 +181,14 @@ func (s *SessionStore) cleanupLoop() {
 
 func (s *SessionStore) cleanup() {
 	cutoff := time.Now().UTC().Add(-SessionExpiry)
-	s.db.Exec("DELETE FROM sessions WHERE last_seen_at < ?", cutoff)
+	if _, err := s.db.Exec("DELETE FROM sessions WHERE last_seen_at < ?", cutoff); err != nil {
+		log.Printf("session cleanup error: %v", err)
+	}
 
 	adminCutoff := time.Now().UTC().Add(-AdminSessionExpiry)
-	s.db.Exec("DELETE FROM admin_sessions WHERE created_at < ?", adminCutoff)
+	if _, err := s.db.Exec("DELETE FROM admin_sessions WHERE created_at < ?", adminCutoff); err != nil {
+		log.Printf("admin session cleanup error: %v", err)
+	}
 }
 
 func generateSessionID() (string, error) {

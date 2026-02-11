@@ -12,3 +12,13 @@ services:
       - ALBUM_PATH=/album
       - DATA_PATH=/data
     restart: unless-stopped
+
+  wizard:
+    image: golang:1.24
+    working_dir: /src
+    command: ["go", "run", "./cmd/setupwizard"]
+    stdin_open: true
+    tty: true
+    profiles: ["tools"]
+    volumes:
+      - ./:/src

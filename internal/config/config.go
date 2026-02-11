@@ -57,7 +57,7 @@ func NewManager(dataPath, albumPath string) (*Manager, error) {
 func (m *Manager) Get() Config {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
-	return *m.config
+	return cloneConfig(*m.config)
 }
 
 // Update writes a new configuration to disk and reloads it into memory.
@@ -69,7 +69,8 @@ func (m *Manager) Update(cfg Config) error {
 		return err
 	}
 
-	m.config = &cfg
+	cloned := cloneConfig(cfg)
+	m.config = &cloned
 	return nil
 }
 
@@ -98,7 +99,8 @@ func (m *Manager) loadLocked() error {
 		return fmt.Errorf("parse config: %w", err)
 	}
 
-	m.config = &cfg
+	cloned := cloneConfig(cfg)
+	m.config = &cloned
 	return nil
 }
 
@@ -173,4 +175,13 @@ func deriveTitle(stem string) string {
 		return stem
 	}
 	return strings.Join(words, " ")
+}
+
+func cloneConfig(cfg Config) Config {
+	out := cfg
+	if cfg.Tracks != nil {
+		out.Tracks = make([]Track, len(cfg.Tracks))
+		copy(out.Tracks, cfg.Tracks)
+	}
+	return out
 }

@@ -53,10 +53,22 @@ body::after {
     content: '';
     position: fixed;
     inset: 0;
-    opacity: 0.03;
+    opacity: 0.035;
     background-image: url("data:image/svg+xml,%3Csvg viewBox='0 0 256 256' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='4' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E");
+    background-size: 220px 220px;
+    background-position: 0 0;
+    animation: grain-shift 8s steps(8, end) infinite;
     pointer-events: none;
     z-index: 9999;
+}
+
+@keyframes grain-shift {
+    0% { background-position: 0 0; }
+    20% { background-position: -18px 12px; }
+    40% { background-position: 14px -16px; }
+    60% { background-position: -10px 9px; }
+    80% { background-position: 11px -13px; }
+    100% { background-position: 0 0; }
 }
 
 /* === Screens === */
@@ -79,31 +91,46 @@ body::after {
 /* === Gate === */
 .gate-inner {
     width: 100%;
-    max-width: 320px;
+    max-width: 360px;
     padding: 0 24px;
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+}
+
+.gate-prompt {
+    text-align: center;
+    font-family: var(--sans);
+    font-size: 0.78rem;
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+    color: rgba(212, 207, 196, 0.72);
+    user-select: none;
 }
 
 #passphrase {
     width: 100%;
-    background: transparent;
-    border: none;
-    border-bottom: 1px solid var(--border);
+    background: rgba(255, 255, 255, 0.03);
+    border: 1px solid rgba(212, 207, 196, 0.32);
+    border-radius: 8px;
     color: var(--text);
     font-family: var(--serif);
-    font-size: 1.25rem;
-    padding: 12px 0;
+    font-size: 1.15rem;
+    padding: 13px 14px;
     outline: none;
     text-align: center;
-    letter-spacing: 0.05em;
-    transition: border-color 0.3s ease;
+    letter-spacing: 0.03em;
+    transition: border-color 0.25s ease, box-shadow 0.25s ease, background 0.25s ease;
 }
 
 #passphrase:focus {
-    border-bottom-color: var(--accent);
+    border-color: var(--accent);
+    box-shadow: 0 0 0 2px rgba(138, 122, 90, 0.2);
+    background: rgba(255, 255, 255, 0.05);
 }
 
 #passphrase::placeholder {
-    color: transparent;
+    color: rgba(212, 207, 196, 0.58);
 }
 
 /* Shake animation — wrong passphrase */
@@ -147,16 +174,22 @@ body::after {
     border-radius: 2px;
     opacity: 0.85;
     flex-shrink: 0;
+    background: rgba(255, 255, 255, 0.04);
 }
 
 .cover.hidden {
     display: none;
 }
 
+.cover.fallback {
+    object-fit: contain;
+    padding: 8px;
+}
+
 /* Oscilloscope */
 #oscilloscope {
     width: 100%;
-    height: 56px;
+    height: 84px;
     flex-shrink: 0;
     margin: 16px 0;
 }
@@ -262,8 +295,23 @@ body::after {
 }
 
 .control-btn-main {
-    font-size: 1.5rem;
+    width: 48px;
+    height: 48px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 1.45rem;
     color: var(--text);
+    font-family: var(--sans);
+    font-weight: 500;
+    border: 1px solid var(--border);
+    border-radius: 50%;
+    padding: 0;
+}
+
+.control-btn-main.is-paused {
+    font-size: 1.3rem;
+    letter-spacing: 0;
 }
 
 /* Progress bar */
@@ -307,6 +355,48 @@ body::after {
     color: var(--text-dim);
     margin-top: 4px;
     font-variant-numeric: tabular-nums;
+}
+
+.volume-container {
+    margin-top: 10px;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+}
+
+.volume-btn {
+    min-width: 42px;
+    padding: 4px 8px;
+    font-size: 0.7rem;
+    letter-spacing: 0.08em;
+}
+
+.volume {
+    -webkit-appearance: none;
+    appearance: none;
+    width: 100%;
+    height: 2px;
+    background: var(--border);
+    border-radius: 1px;
+    outline: none;
+}
+
+.volume::-webkit-slider-thumb {
+    -webkit-appearance: none;
+    width: 9px;
+    height: 9px;
+    background: var(--text);
+    border-radius: 50%;
+    cursor: pointer;
+}
+
+.volume::-moz-range-thumb {
+    width: 9px;
+    height: 9px;
+    background: var(--text);
+    border-radius: 50%;
+    border: none;
+    cursor: pointer;
 }
 
 /* Track list */
@@ -408,13 +498,17 @@ body::after {
         padding: 32px 16px 16px;
     }
 
+    .gate-inner {
+        padding: 0 18px;
+    }
+
     .cover {
         width: 100px;
         height: 100px;
     }
 
     #oscilloscope {
-        height: 40px;
+        height: 52px;
         margin: 12px 0;
     }
 
@@ -434,7 +528,7 @@ body::after {
     }
 
     #oscilloscope {
-        height: 32px;
+        height: 40px;
         margin: 8px 0;
     }
 
@@ -444,6 +538,81 @@ body::after {
 
     .player-inner {
         padding-top: 16px;
+    }
+}
+
+@media (min-width: 1024px) and (min-height: 680px) {
+    .player-inner {
+        max-width: 1320px;
+        width: min(1320px, calc(100vw - 64px));
+        margin: 0 auto;
+        padding: 36px 32px 24px;
+        display: grid;
+        grid-template-columns: minmax(360px, 440px) minmax(520px, 680px);
+        grid-template-rows: auto auto auto auto auto minmax(0, 1fr);
+        grid-template-areas:
+            "cover lyrics"
+            "scope lyrics"
+            "title lyrics"
+            "controls lyrics"
+            "toggle lyrics"
+            "tracklist lyrics";
+        column-gap: 56px;
+        row-gap: 6px;
+        align-items: start;
+        justify-content: center;
+    }
+
+    .cover {
+        grid-area: cover;
+        width: 164px;
+        height: 164px;
+        justify-self: center;
+        margin-bottom: 6px;
+    }
+
+    #oscilloscope {
+        grid-area: scope;
+        height: 118px;
+        margin: 8px 0 6px;
+    }
+
+    .track-title {
+        grid-area: title;
+        padding-bottom: 8px;
+        font-size: 1.65rem;
+    }
+
+    .controls {
+        grid-area: controls;
+        padding: 8px 0;
+    }
+
+    .tracklist-toggle {
+        grid-area: toggle;
+        text-align: left;
+        padding-top: 8px;
+    }
+
+    .tracklist {
+        grid-area: tracklist;
+    }
+
+    .tracklist.expanded {
+        max-height: 240px;
+    }
+
+    .lyrics-container {
+        grid-area: lyrics;
+        height: calc(100vh - 112px);
+        min-height: 420px;
+        width: 100%;
+    }
+
+    .lyrics {
+        text-align: left;
+        padding: 70px 24px;
+        font-size: 1.22rem;
     }
 }
 

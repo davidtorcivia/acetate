@@ -1,15 +1,22 @@
 package server
 
 import (
+	"bytes"
+	"crypto/sha256"
 	"crypto/subtle"
-	"encoding/json"
+	"errors"
+	"image"
+	"image/jpeg"
+	_ "image/png"
 	"io"
 	"io/fs"
 	"log"
+	"mime"
 	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/go-chi/chi/v5"
 	"golang.org/x/crypto/bcrypt"
@@ -25,6 +32,7 @@ func (s *Server) routes() http.Handler {
 	r := chi.NewRouter()
 
 	// Global middleware
+	r.Use(securityHeaders)
 	r.Use(requestLogger)
 	r.Use(csrfCheck)
 
@@ -61,7 +69,7 @@ func (s *Server) routes() http.Handler {
 			r.Get("/api/tracks", s.handleAdminGetTracks)
 			r.With(bodyLimiter(102400)).Put("/api/tracks", s.handleAdminUpdateTracks)
 			r.With(bodyLimiter(1024)).Put("/api/password", s.handleAdminUpdatePassword)
-			r.With(bodyLimiter(10 << 20)).Post("/api/cover", s.handleAdminUploadCover) // 10MB
+			r.With(bodyLimiter(10<<20)).Post("/api/cover", s.handleAdminUploadCover) // 10MB
 			r.Get("/api/config", s.handleAdminGetConfig)
 		})
 
@@ -94,7 +102,7 @@ func (s *Server) handleAuth(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		Passphrase string `json:"passphrase"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	if err := decodeJSONBody(r, &req); err != nil {
 		jsonError(w, "bad request", http.StatusBadRequest)
 		return
 	}
@@ -111,6 +119,11 @@ func (s *Server) handleAuth(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Rotate an existing session ID to prevent fixation and stale buildup.
+	if oldCookie, err := r.Cookie("acetate_session"); err == nil && oldCookie.Value != "" {
+		_ = s.sessions.DeleteSession(oldCookie.Value)
+	}
+
 	sessionID, err := s.sessions.CreateSession(clientIP)
 	if err != nil {
 		log.Printf("create session error: %v", err)
@@ -124,7 +137,7 @@ func (s *Server) handleAuth(w http.ResponseWriter, r *http.Request) {
 		Path:     "/",
 		MaxAge:   7 * 24 * 60 * 60, // 7 days
 		HttpOnly: true,
-		Secure:   true,
+		Secure:   isSecureRequest(r),
 		SameSite: http.SameSiteStrictMode,
 	})
 
@@ -154,7 +167,7 @@ func (s *Server) handleLogout(w http.ResponseWriter, r *http.Request) {
 		Path:     "/",
 		MaxAge:   -1,
 		HttpOnly: true,
-		Secure:   true,
+		Secure:   isSecureRequest(r),
 		SameSite: http.SameSiteStrictMode,
 	})
 
@@ -183,7 +196,12 @@ func (s *Server) handleGetCover(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleStreamTrack(w http.ResponseWriter, r *http.Request) {
-	stem := chi.URLParam(r, "stem")
+	rawStem := chi.URLParam(r, "stem")
+	stem, err := normalizeStemParam(rawStem)
+	if err != nil {
+		jsonError(w, "bad request", http.StatusBadRequest)
+		return
+	}
 
 	if !album.ValidateStem(stem) {
 		jsonError(w, "bad request", http.StatusBadRequest)
@@ -192,7 +210,7 @@ func (s *Server) handleStreamTrack(w http.ResponseWriter, r *http.Request) {
 
 	cfg := s.config.Get()
 	if !album.StemInConfig(stem, cfg) {
-		jsonError(w, "not found", http.StatusNotFound)
+		jsonError(w, "bad request", http.StatusBadRequest)
 		return
 	}
 
@@ -200,7 +218,12 @@ func (s *Server) handleStreamTrack(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleGetLyrics(w http.ResponseWriter, r *http.Request) {
-	stem := chi.URLParam(r, "stem")
+	rawStem := chi.URLParam(r, "stem")
+	stem, err := normalizeStemParam(rawStem)
+	if err != nil {
+		jsonError(w, "bad request", http.StatusBadRequest)
+		return
+	}
 
 	if !album.ValidateStem(stem) {
 		jsonError(w, "bad request", http.StatusBadRequest)
@@ -209,7 +232,7 @@ func (s *Server) handleGetLyrics(w http.ResponseWriter, r *http.Request) {
 
 	cfg := s.config.Get()
 	if !album.StemInConfig(stem, cfg) {
-		jsonError(w, "not found", http.StatusNotFound)
+		jsonError(w, "bad request", http.StatusBadRequest)
 		return
 	}
 
@@ -247,17 +270,27 @@ func (s *Server) handleAdminAuth(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	clientIP := s.cfIPs.GetClientIP(r)
+	if !s.rateLimiter.Allow("admin:" + clientIP) {
+		jsonError(w, "rate limited", http.StatusTooManyRequests)
+		return
+	}
+
 	var req struct {
 		Token string `json:"token"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	if err := decodeJSONBody(r, &req); err != nil {
 		jsonError(w, "bad request", http.StatusBadRequest)
 		return
 	}
 
-	if subtle.ConstantTimeCompare([]byte(req.Token), []byte(s.adminToken)) != 1 {
+	if !secureTokenEqual(req.Token, s.adminToken) {
 		jsonError(w, "unauthorized", http.StatusUnauthorized)
 		return
+	}
+
+	if oldCookie, err := r.Cookie("acetate_admin"); err == nil && oldCookie.Value != "" {
+		_ = s.sessions.DeleteAdminSession(oldCookie.Value)
 	}
 
 	sessionID, err := s.sessions.CreateAdminSession()
@@ -273,7 +306,7 @@ func (s *Server) handleAdminAuth(w http.ResponseWriter, r *http.Request) {
 		Path:     "/admin",
 		MaxAge:   3600, // 1 hour
 		HttpOnly: true,
-		Secure:   true,
+		Secure:   isSecureRequest(r),
 		SameSite: http.SameSiteStrictMode,
 	})
 
@@ -292,7 +325,7 @@ func (s *Server) handleAdminLogout(w http.ResponseWriter, r *http.Request) {
 		Path:     "/admin",
 		MaxAge:   -1,
 		HttpOnly: true,
-		Secure:   true,
+		Secure:   isSecureRequest(r),
 		SameSite: http.SameSiteStrictMode,
 	})
 
@@ -354,27 +387,25 @@ func (s *Server) handleAdminUpdateTracks(w http.ResponseWriter, r *http.Request)
 			DisplayIndex string `json:"display_index,omitempty"`
 		} `json:"tracks"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	if err := decodeJSONBody(r, &req); err != nil {
 		jsonError(w, "bad request", http.StatusBadRequest)
 		return
 	}
 
 	cfg := s.config.Get()
 	if req.Title != "" {
-		cfg.Title = req.Title
+		cfg.Title = trimAndCollapseSpaces(req.Title)
 	}
 	if req.Artist != "" {
-		cfg.Artist = req.Artist
+		cfg.Artist = trimAndCollapseSpaces(req.Artist)
 	}
 	if req.Tracks != nil {
-		cfg.Tracks = nil
-		for _, t := range req.Tracks {
-			cfg.Tracks = append(cfg.Tracks, config.Track{
-				Stem:         t.Stem,
-				Title:        t.Title,
-				DisplayIndex: t.DisplayIndex,
-			})
+		normalized, err := normalizeTrackUpdate(req.Tracks, cfg.Tracks, s.albumPath)
+		if err != nil {
+			jsonError(w, "bad request", http.StatusBadRequest)
+			return
 		}
+		cfg.Tracks = normalized
 	}
 
 	if err := s.config.Update(cfg); err != nil {
@@ -390,12 +421,12 @@ func (s *Server) handleAdminUpdatePassword(w http.ResponseWriter, r *http.Reques
 	var req struct {
 		Passphrase string `json:"passphrase"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	if err := decodeJSONBody(r, &req); err != nil {
 		jsonError(w, "bad request", http.StatusBadRequest)
 		return
 	}
 
-	if req.Passphrase == "" {
+	if strings.TrimSpace(req.Passphrase) == "" {
 		jsonError(w, "passphrase cannot be empty", http.StatusBadRequest)
 		return
 	}
@@ -432,8 +463,37 @@ func (s *Server) handleAdminUploadCover(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
+	if len(data) == 0 {
+		jsonError(w, "bad request", http.StatusBadRequest)
+		return
+	}
+
+	contentType := http.DetectContentType(data)
+	if contentType != "image/jpeg" && contentType != "image/png" {
+		jsonError(w, "bad request", http.StatusBadRequest)
+		return
+	}
+
+	img, format, err := image.Decode(bytes.NewReader(data))
+	if err != nil || (format != "jpeg" && format != "png") {
+		jsonError(w, "bad request", http.StatusBadRequest)
+		return
+	}
+
+	b := img.Bounds()
+	if b.Dx() <= 0 || b.Dy() <= 0 || b.Dx() > 4096 || b.Dy() > 4096 {
+		jsonError(w, "bad request", http.StatusBadRequest)
+		return
+	}
+
+	var encoded bytes.Buffer
+	if err := jpeg.Encode(&encoded, img, &jpeg.Options{Quality: 90}); err != nil {
+		jsonError(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+
 	coverPath := filepath.Join(s.dataPath, "cover_override.jpg")
-	if err := os.WriteFile(coverPath, data, 0644); err != nil {
+	if err := os.WriteFile(coverPath, encoded.Bytes(), 0644); err != nil {
 		log.Printf("write cover error: %v", err)
 		jsonError(w, "internal error", http.StatusInternalServerError)
 		return
@@ -477,17 +537,14 @@ func (s *Server) handleSPA(w http.ResponseWriter, r *http.Request) {
 		path = "index.html"
 	}
 
-	f, err := staticFS.Open(path)
-	if err != nil {
-		// SPA fallback — serve index.html for all unmatched routes
-		path = "index.html"
-		f, err = staticFS.Open(path)
-		if err != nil {
-			http.NotFound(w, r)
-			return
-		}
+	if strings.Contains(path, "..") {
+		http.NotFound(w, r)
+		return
 	}
-	f.Close()
+
+	if _, err := fs.Stat(staticFS, path); err != nil {
+		path = "index.html"
+	}
 
 	// Set cache headers for static assets
 	if path != "index.html" && path != "sw.js" {
@@ -496,7 +553,7 @@ func (s *Server) handleSPA(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Cache-Control", "no-cache")
 	}
 
-	http.FileServer(http.FS(staticFS)).ServeHTTP(w, r)
+	serveEmbeddedFile(w, r, staticFS, path)
 }
 
 func (s *Server) handleAdminStatic(w http.ResponseWriter, r *http.Request) {
@@ -517,17 +574,80 @@ func (s *Server) handleAdminStatic(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	f, err := staticFS.Open(path)
-	if err != nil {
-		path = "index.html"
-		f, err = staticFS.Open(path)
-		if err != nil {
-			http.NotFound(w, r)
-			return
-		}
+	if strings.Contains(path, "..") {
+		http.NotFound(w, r)
+		return
 	}
-	f.Close()
 
-	w.Header().Set("Cache-Control", "no-cache")
-	http.FileServer(http.FS(staticFS)).ServeHTTP(w, r)
+	if _, err := fs.Stat(staticFS, path); err != nil {
+		path = "index.html"
+	}
+
+	w.Header().Set("Cache-Control", "no-store")
+	serveEmbeddedFile(w, r, staticFS, path)
+}
+
+func normalizeTrackUpdate(input []struct {
+	Stem         string `json:"stem"`
+	Title        string `json:"title"`
+	DisplayIndex string `json:"display_index,omitempty"`
+}, existing []config.Track, albumPath string) ([]config.Track, error) {
+	if len(input) == 0 || len(input) != len(existing) {
+		return nil, errors.New("invalid track count")
+	}
+
+	existingStems := make(map[string]struct{}, len(existing))
+	for _, t := range existing {
+		existingStems[t.Stem] = struct{}{}
+	}
+
+	seen := make(map[string]struct{}, len(input))
+	normalized := make([]config.Track, 0, len(input))
+
+	for _, t := range input {
+		stem := strings.TrimSpace(t.Stem)
+		title := trimAndCollapseSpaces(t.Title)
+		display := strings.TrimSpace(t.DisplayIndex)
+
+		if !album.ValidateStem(stem) || title == "" || len(title) > 256 || len(display) > 32 {
+			return nil, errors.New("invalid track fields")
+		}
+		if _, ok := existingStems[stem]; !ok {
+			return nil, errors.New("unknown stem")
+		}
+		if _, ok := seen[stem]; ok {
+			return nil, errors.New("duplicate stem")
+		}
+		if _, err := os.Stat(filepath.Join(albumPath, stem+".mp3")); err != nil {
+			return nil, errors.New("missing mp3")
+		}
+
+		seen[stem] = struct{}{}
+		normalized = append(normalized, config.Track{
+			Stem:         stem,
+			Title:        title,
+			DisplayIndex: display,
+		})
+	}
+
+	return normalized, nil
+}
+
+func secureTokenEqual(a, b string) bool {
+	sumA := sha256.Sum256([]byte(a))
+	sumB := sha256.Sum256([]byte(b))
+	return subtle.ConstantTimeCompare(sumA[:], sumB[:]) == 1
+}
+
+func serveEmbeddedFile(w http.ResponseWriter, r *http.Request, fsys fs.FS, path string) {
+	data, err := fs.ReadFile(fsys, path)
+	if err != nil {
+		http.NotFound(w, r)
+		return
+	}
+
+	if ctype := mime.TypeByExtension(filepath.Ext(path)); ctype != "" {
+		w.Header().Set("Content-Type", ctype)
+	}
+	http.ServeContent(w, r, path, time.Time{}, bytes.NewReader(data))
 }

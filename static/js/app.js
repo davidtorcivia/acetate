@@ -29,10 +29,12 @@
                     if (r.ok) {
                         Acetate.onAuthenticated();
                     } else {
+                        Acetate.notifyServiceWorker('UNAUTHENTICATED');
                         Acetate.showGate();
                     }
                 })
                 .catch(function () {
+                    Acetate.notifyServiceWorker('UNAUTHENTICATED');
                     Acetate.showGate();
                 });
         },
@@ -40,6 +42,7 @@
         onAuthenticated: function () {
             // Push history state for back button protection
             history.pushState({ screen: 'player' }, '', '/');
+            this.notifyServiceWorker('AUTHENTICATED');
 
             this.loadAlbumData();
         },
@@ -60,6 +63,7 @@
                     }
                 })
                 .catch(function () {
+                    Acetate.notifyServiceWorker('UNAUTHENTICATED');
                     Acetate.showGate();
                 });
         },
@@ -79,10 +83,42 @@
             document.getElementById('player').classList.add('active');
 
             // Load cover
-            document.getElementById('cover').src = '/api/cover';
-            document.getElementById('cover').onerror = function () {
-                this.classList.add('hidden');
+            var cover = document.getElementById('cover');
+            cover.classList.remove('hidden', 'fallback');
+            cover.src = '/api/cover';
+            cover.onerror = function () {
+                this.onerror = null;
+                this.classList.add('fallback');
+                this.src = Acetate.makeCoverFallback();
             };
+        },
+
+        makeCoverFallback: function () {
+            var title = (this.albumData && this.albumData.title) ? this.albumData.title : 'Acetate';
+            title = String(title).replace(/[<>&]/g, '').slice(0, 28);
+            var svg =
+                "<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 300 300'>" +
+                "<rect width='300' height='300' fill='%23110f0d'/>" +
+                "<rect x='12' y='12' width='276' height='276' fill='none' stroke='%23292620' stroke-width='2'/>" +
+                "<text x='150' y='155' text-anchor='middle' fill='%23d4cfc4' font-size='26' font-family='serif'>" + title + "</text>" +
+                "</svg>";
+            return 'data:image/svg+xml;utf8,' + encodeURIComponent(svg);
+        },
+
+        notifyServiceWorker: function (state) {
+            if (!('serviceWorker' in navigator)) return;
+
+            var message = { type: state };
+            if (navigator.serviceWorker.controller) {
+                navigator.serviceWorker.controller.postMessage(message);
+                return;
+            }
+
+            navigator.serviceWorker.ready.then(function (reg) {
+                if (reg.active) {
+                    reg.active.postMessage(message);
+                }
+            }).catch(function () { });
         }
     };
 

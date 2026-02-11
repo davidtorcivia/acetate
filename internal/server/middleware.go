@@ -3,6 +3,7 @@ package server
 import (
 	"log"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
 )
@@ -30,7 +31,7 @@ func (s *Server) requireSession(next http.Handler) http.Handler {
 				Path:     "/",
 				MaxAge:   -1,
 				HttpOnly: true,
-				Secure:   true,
+				Secure:   isSecureRequest(r),
 				SameSite: http.SameSiteStrictMode,
 			})
 			jsonError(w, "unauthorized", http.StatusUnauthorized)
@@ -63,7 +64,7 @@ func (s *Server) requireAdmin(next http.Handler) http.Handler {
 				Path:     "/admin",
 				MaxAge:   -1,
 				HttpOnly: true,
-				Secure:   true,
+				Secure:   isSecureRequest(r),
 				SameSite: http.SameSiteStrictMode,
 			})
 			jsonError(w, "unauthorized", http.StatusUnauthorized)
@@ -77,18 +78,61 @@ func (s *Server) requireAdmin(next http.Handler) http.Handler {
 // csrfCheck validates the Origin header on state-mutating requests.
 func csrfCheck(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method == "POST" || r.Method == "PUT" || r.Method == "DELETE" || r.Method == "PATCH" {
-			origin := r.Header.Get("Origin")
-			if origin != "" {
-				// Allow same-origin requests
-				host := r.Host
-				if !strings.HasSuffix(origin, "://"+host) {
-					jsonError(w, "forbidden", http.StatusForbidden)
-					return
-				}
+		if isMutatingMethod(r.Method) && strings.HasPrefix(r.URL.Path, "/admin/api/") {
+			origin := strings.TrimSpace(r.Header.Get("Origin"))
+			if origin == "" || !sameOrigin(r, origin) {
+				jsonError(w, "forbidden", http.StatusForbidden)
+				return
 			}
-			// If no Origin header (e.g., sendBeacon), allow — the session cookie check is sufficient
 		}
+		next.ServeHTTP(w, r)
+	})
+}
+
+func isMutatingMethod(method string) bool {
+	return method == http.MethodPost || method == http.MethodPut || method == http.MethodDelete || method == http.MethodPatch
+}
+
+func sameOrigin(r *http.Request, origin string) bool {
+	u, err := url.Parse(origin)
+	if err != nil || u.Scheme == "" || u.Host == "" {
+		return false
+	}
+
+	expectedScheme := requestScheme(r)
+	expectedHost := strings.ToLower(r.Host)
+
+	return strings.EqualFold(u.Scheme, expectedScheme) && strings.EqualFold(u.Host, expectedHost)
+}
+
+func requestScheme(r *http.Request) string {
+	if proto := r.Header.Get("X-Forwarded-Proto"); proto != "" {
+		if i := strings.Index(proto, ","); i > 0 {
+			proto = proto[:i]
+		}
+		proto = strings.TrimSpace(strings.ToLower(proto))
+		if proto == "http" || proto == "https" {
+			return proto
+		}
+	}
+	if r.TLS != nil {
+		return "https"
+	}
+	return "http"
+}
+
+// securityHeaders sets secure defaults for every response.
+func securityHeaders(next http.Handler) http.Handler {
+	const csp = "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; media-src 'self'; connect-src 'self'; font-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'"
+
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		h := w.Header()
+		h.Set("X-Content-Type-Options", "nosniff")
+		h.Set("X-Frame-Options", "DENY")
+		h.Set("Referrer-Policy", "no-referrer")
+		h.Set("Cross-Origin-Resource-Policy", "same-origin")
+		h.Set("Permissions-Policy", "accelerometer=(), camera=(), geolocation=(), gyroscope=(), microphone=(), payment=(), usb=()")
+		h.Set("Content-Security-Policy", csp)
 		next.ServeHTTP(w, r)
 	})
 }
@@ -99,6 +143,9 @@ func requestLogger(next http.Handler) http.Handler {
 		start := time.Now()
 		wrapped := &statusWriter{ResponseWriter: w, status: 200}
 		next.ServeHTTP(wrapped, r)
+		if strings.HasPrefix(r.URL.Path, "/api/stream/") && wrapped.status < http.StatusBadRequest {
+			return
+		}
 		log.Printf("%s %s %d %s", r.Method, r.URL.Path, wrapped.status, time.Since(start).Round(time.Millisecond))
 	})
 }

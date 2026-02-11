@@ -3,10 +3,12 @@ package server
 import (
 	"bytes"
 	"encoding/json"
+	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"acetate/internal/config"
@@ -93,7 +95,10 @@ func (env *testEnv) authenticateAdmin(t *testing.T) []*http.Cookie {
 	t.Helper()
 
 	body, _ := json.Marshal(map[string]string{"token": "test-admin-token"})
-	resp, err := env.ts.Client().Post(env.ts.URL+"/admin/api/auth", "application/json", bytes.NewReader(body))
+	req, _ := http.NewRequest(http.MethodPost, env.ts.URL+"/admin/api/auth", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Origin", env.ts.URL)
+	resp, err := env.ts.Client().Do(req)
 	if err != nil {
 		t.Fatalf("admin auth request: %v", err)
 	}
@@ -212,6 +217,37 @@ func TestStreamTrackPathTraversal(t *testing.T) {
 	}
 }
 
+func TestStreamTrackStemWithSpaces(t *testing.T) {
+	env := setupTest(t)
+
+	stem := "03 - Space Name (1)"
+	if err := os.WriteFile(filepath.Join(env.albumDir, stem+".mp3"), []byte("fake-space-mp3"), 0644); err != nil {
+		t.Fatalf("write track: %v", err)
+	}
+
+	cfg := env.srv.config.Get()
+	cfg.Tracks = append(cfg.Tracks, config.Track{Stem: stem, Title: "Space Name"})
+	if err := env.srv.config.Update(cfg); err != nil {
+		t.Fatalf("update config: %v", err)
+	}
+
+	cookies := env.authenticate(t)
+	req, _ := http.NewRequest("GET", env.ts.URL+"/api/stream/03%20-%20Space%20Name%20%281%29", nil)
+	for _, c := range cookies {
+		req.AddCookie(c)
+	}
+
+	resp, err := env.ts.Client().Do(req)
+	if err != nil {
+		t.Fatalf("stream request: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("stream status = %d, want 200", resp.StatusCode)
+	}
+}
+
 func TestLyrics(t *testing.T) {
 	env := setupTest(t)
 	cookies := env.authenticate(t)
@@ -259,12 +295,44 @@ func TestCover(t *testing.T) {
 	}
 }
 
+func TestCoverSupportsJPEGFallback(t *testing.T) {
+	env := setupTest(t)
+	cookies := env.authenticate(t)
+
+	if err := os.Remove(filepath.Join(env.albumDir, "cover.jpg")); err != nil {
+		t.Fatalf("remove cover.jpg: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(env.albumDir, "cover.jpeg"), []byte("fake-jpeg-2"), 0644); err != nil {
+		t.Fatalf("write cover.jpeg: %v", err)
+	}
+
+	req, _ := http.NewRequest("GET", env.ts.URL+"/api/cover", nil)
+	for _, c := range cookies {
+		req.AddCookie(c)
+	}
+	resp, err := env.ts.Client().Do(req)
+	if err != nil {
+		t.Fatalf("cover request: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("cover status = %d, want 200", resp.StatusCode)
+	}
+	if ct := resp.Header.Get("Content-Type"); !strings.HasPrefix(ct, "image/jpeg") {
+		t.Fatalf("content-type = %q, want image/jpeg", ct)
+	}
+}
+
 func TestAdminAuth(t *testing.T) {
 	env := setupTest(t)
 
 	// Wrong token → 401
 	body, _ := json.Marshal(map[string]string{"token": "wrong"})
-	resp, err := env.ts.Client().Post(env.ts.URL+"/admin/api/auth", "application/json", bytes.NewReader(body))
+	req, _ := http.NewRequest(http.MethodPost, env.ts.URL+"/admin/api/auth", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Origin", env.ts.URL)
+	resp, err := env.ts.Client().Do(req)
 	if err != nil {
 		t.Fatalf("admin auth request: %v", err)
 	}
@@ -283,6 +351,104 @@ func TestAdminAuth(t *testing.T) {
 	}
 	if !found {
 		t.Error("no admin session cookie set")
+	}
+}
+
+func TestAdminRejectsMissingOrigin(t *testing.T) {
+	env := setupTest(t)
+
+	body, _ := json.Marshal(map[string]string{"token": "test-admin-token"})
+	req, _ := http.NewRequest(http.MethodPost, env.ts.URL+"/admin/api/auth", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := env.ts.Client().Do(req)
+	if err != nil {
+		t.Fatalf("admin auth request: %v", err)
+	}
+	resp.Body.Close()
+
+	if resp.StatusCode != http.StatusForbidden {
+		t.Fatalf("status = %d, want 403", resp.StatusCode)
+	}
+}
+
+func TestAdminUpdateTracksValidation(t *testing.T) {
+	env := setupTest(t)
+	adminCookies := env.authenticateAdmin(t)
+
+	body, _ := json.Marshal(map[string]interface{}{
+		"tracks": []map[string]string{
+			{"stem": "../bad", "title": "Bad"},
+			{"stem": "02-hollow", "title": "Hollow"},
+		},
+	})
+	req, _ := http.NewRequest(http.MethodPut, env.ts.URL+"/admin/api/tracks", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Origin", env.ts.URL)
+	for _, c := range adminCookies {
+		req.AddCookie(c)
+	}
+	resp, err := env.ts.Client().Do(req)
+	if err != nil {
+		t.Fatalf("update tracks request: %v", err)
+	}
+	resp.Body.Close()
+
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400", resp.StatusCode)
+	}
+}
+
+func TestAdminUploadCoverRejectsNonImage(t *testing.T) {
+	env := setupTest(t)
+	adminCookies := env.authenticateAdmin(t)
+
+	var body bytes.Buffer
+	writer := multipart.NewWriter(&body)
+	part, err := writer.CreateFormFile("cover", "cover.txt")
+	if err != nil {
+		t.Fatalf("CreateFormFile: %v", err)
+	}
+	if _, err := part.Write([]byte("not-an-image")); err != nil {
+		t.Fatalf("Write: %v", err)
+	}
+	writer.Close()
+
+	req, _ := http.NewRequest(http.MethodPost, env.ts.URL+"/admin/api/cover", &body)
+	req.Header.Set("Content-Type", writer.FormDataContentType())
+	req.Header.Set("Origin", env.ts.URL)
+	for _, c := range adminCookies {
+		req.AddCookie(c)
+	}
+	resp, err := env.ts.Client().Do(req)
+	if err != nil {
+		t.Fatalf("upload cover request: %v", err)
+	}
+	resp.Body.Close()
+
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400", resp.StatusCode)
+	}
+}
+
+func TestSPAFallback(t *testing.T) {
+	env := setupTest(t)
+
+	resp, err := env.ts.Client().Get(env.ts.URL + "/listening-room")
+	if err != nil {
+		t.Fatalf("SPA fallback request: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200", resp.StatusCode)
+	}
+
+	var body bytes.Buffer
+	if _, err := body.ReadFrom(resp.Body); err != nil {
+		t.Fatalf("read body: %v", err)
+	}
+	if !strings.Contains(body.String(), "id=\"gate\"") {
+		t.Fatalf("expected index shell, body=%q", body.String())
 	}
 }
 

@@ -28,8 +28,9 @@ func Open(dataPath string) (*sql.DB, error) {
 		return nil, fmt.Errorf("ping database: %w", err)
 	}
 
-	// Single writer connection for SQLite
-	db.SetMaxOpenConns(1)
+	// Keep a small pool so reads can proceed while writes are serialized by SQLite/WAL.
+	db.SetMaxOpenConns(4)
+	db.SetMaxIdleConns(4)
 
 	if err := Migrate(db); err != nil {
 		db.Close()

@@ -17,7 +17,8 @@
     <!-- Gate -->
     <div id="gate" class="screen active">
         <div class="gate-inner">
-            <input type="password" id="passphrase" autocomplete="off" spellcheck="false" autofocus>
+            <p class="gate-prompt">Enter Passphrase</p>
+            <input type="password" id="passphrase" placeholder="Passphrase" autocomplete="off" spellcheck="false" aria-label="Passphrase" autofocus>
         </div>
     </div>
 
@@ -42,6 +43,10 @@
                         <span id="time-current">0:00</span>
                         <span id="time-total">0:00</span>
                     </div>
+                </div>
+                <div class="volume-container">
+                    <button id="btn-mute" class="control-btn volume-btn" aria-label="Mute">VOL</button>
+                    <input type="range" id="volume" class="volume" min="0" max="1" step="0.01" value="1" aria-label="Volume">
                 </div>
             </div>
             <div class="tracklist-toggle" id="tracklist-toggle">

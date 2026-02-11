@@ -6,6 +6,7 @@
     var currentFormat = null;
     var lrcData = null;     // parsed LRC: [{time, lines}]
     var activeIndex = -1;
+    var lrcGroups = [];
 
     window.AcetateLyrics = {
         load: load,
@@ -23,6 +24,7 @@
         currentFormat = null;
         lrcData = null;
         activeIndex = -1;
+        lrcGroups = [];
         lyricsEl.innerHTML = '';
 
         if (!format) {
@@ -30,7 +32,7 @@
             return;
         }
 
-        fetch('/api/lyrics/' + stem, { credentials: 'same-origin' })
+        fetch('/api/lyrics/' + encodePathSegment(stem), { credentials: 'same-origin' })
             .then(function (r) {
                 if (!r.ok) throw new Error('not found');
                 return r.json();
@@ -52,30 +54,31 @@
 
     function parseLRC(content) {
         var lines = content.split('\n');
-        var entries = [];
-        var timeRegex = /\[(\d{2}):(\d{2})\.(\d{2,3})\]\s*(.*)/;
+        var grouped = Object.create(null);
+        var timeRegex = /\[(\d{2}):(\d{2})\.(\d{2,3})\]/g;
 
         for (var i = 0; i < lines.length; i++) {
-            var match = lines[i].match(timeRegex);
-            if (!match) continue;
-
-            var minutes = parseInt(match[1], 10);
-            var seconds = parseInt(match[2], 10);
-            var ms = match[3].length === 2 ? parseInt(match[3], 10) * 10 : parseInt(match[3], 10);
-            var time = minutes * 60 + seconds + ms / 1000;
-            var text = match[4].trim();
-
+            var line = lines[i];
+            var text = line.replace(/\[[^\]]+\]/g, '').trim();
             if (!text) continue;
 
-            // Group simultaneous timestamps
-            if (entries.length > 0 && Math.abs(entries[entries.length - 1].time - time) < 0.05) {
-                entries[entries.length - 1].lines.push(text);
-            } else {
-                entries.push({ time: time, lines: [text] });
+            var match = null;
+            timeRegex.lastIndex = 0;
+            while ((match = timeRegex.exec(line)) !== null) {
+                var minutes = parseInt(match[1], 10);
+                var seconds = parseInt(match[2], 10);
+                var ms = match[3].length === 2 ? parseInt(match[3], 10) * 10 : parseInt(match[3], 10);
+                var timeMs = (minutes * 60 * 1000) + (seconds * 1000) + ms;
+                var key = String(timeMs);
+
+                if (!grouped[key]) {
+                    grouped[key] = { time: timeMs / 1000, lines: [] };
+                }
+                grouped[key].lines.push(text);
             }
         }
 
-        // Sort by time
+        var entries = Object.keys(grouped).map(function (k) { return grouped[k]; });
         entries.sort(function (a, b) { return a.time - b.time; });
         return entries;
     }
@@ -89,6 +92,7 @@
         topSpacer.style.height = '40%';
         lyricsEl.appendChild(topSpacer);
 
+        lrcGroups = [];
         for (var i = 0; i < lrcData.length; i++) {
             var entry = lrcData[i];
             var group = document.createElement('div');
@@ -103,6 +107,7 @@
             }
 
             lyricsEl.appendChild(group);
+            lrcGroups.push(group);
         }
 
         // Add spacer at bottom
@@ -130,38 +135,65 @@
     function update(currentTime) {
         if (currentFormat !== 'lrc' || !lrcData || lrcData.length === 0) return;
 
-        // Find active line by binary-ish search
-        var newIndex = -1;
-        for (var i = lrcData.length - 1; i >= 0; i--) {
-            if (currentTime >= lrcData[i].time) {
-                newIndex = i;
-                break;
+        var newIndex = activeIndex;
+
+        if (newIndex < 0 || currentTime < lrcData[newIndex].time) {
+            newIndex = findActiveIndex(currentTime);
+        } else {
+            while (newIndex + 1 < lrcData.length && currentTime >= lrcData[newIndex + 1].time) {
+                newIndex++;
             }
         }
 
         if (newIndex === activeIndex) return;
-        activeIndex = newIndex;
 
-        // Update highlighting
-        var groups = lyricsEl.querySelectorAll('.line-group');
-        for (var g = 0; g < groups.length; g++) {
-            var isActive = parseInt(groups[g].dataset.index) === activeIndex;
-            var lines = groups[g].querySelectorAll('.line');
-            for (var l = 0; l < lines.length; l++) {
-                lines[l].classList.toggle('active', isActive);
-            }
+        if (activeIndex >= 0 && lrcGroups[activeIndex]) {
+            setGroupActive(lrcGroups[activeIndex], false);
+        }
+        activeIndex = newIndex;
+        if (activeIndex >= 0 && lrcGroups[activeIndex]) {
+            setGroupActive(lrcGroups[activeIndex], true);
         }
 
         // Auto-scroll to center active line
         if (activeIndex >= 0 && container) {
-            var activeGroup = lyricsEl.querySelector('.line-group[data-index="' + activeIndex + '"]');
+            var activeGroup = lrcGroups[activeIndex];
             if (activeGroup) {
-                var containerRect = container.getBoundingClientRect();
-                var groupRect = activeGroup.getBoundingClientRect();
-                var offset = groupRect.top - containerRect.top - (containerRect.height / 2) + (groupRect.height / 2);
-                container.scrollBy({ top: offset, behavior: 'smooth' });
+                var target = activeGroup.offsetTop - (container.clientHeight / 2) + (activeGroup.offsetHeight / 2);
+                container.scrollTo({ top: Math.max(0, target), behavior: 'smooth' });
             }
         }
+    }
+
+    function setGroupActive(group, isActive) {
+        var lines = group.querySelectorAll('.line');
+        for (var i = 0; i < lines.length; i++) {
+            lines[i].classList.toggle('active', isActive);
+        }
+    }
+
+    function findActiveIndex(currentTime) {
+        var low = 0;
+        var high = lrcData.length - 1;
+        var idx = -1;
+
+        while (low <= high) {
+            var mid = (low + high) >> 1;
+            if (lrcData[mid].time <= currentTime) {
+                idx = mid;
+                low = mid + 1;
+            } else {
+                high = mid - 1;
+            }
+        }
+
+        return idx;
+    }
+
+    function encodePathSegment(value) {
+        return encodeURIComponent(value).replace(/[!'()*]/g, function (ch) {
+            return '%' + ch.charCodeAt(0).toString(16).toUpperCase();
+        });
     }
 
     document.addEventListener('DOMContentLoaded', init);

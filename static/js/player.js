@@ -9,8 +9,12 @@
     var isSeeking = false;
     var warmedUp = false;
     var rafId = null;
+    var lastPlayEventTrack = -1;
+    var currentVolume = 1;
+    var lastNonZeroVolume = 1;
+    var isMuted = false;
 
-    var btnPlay, btnPrev, btnNext, progress, timeCurrent, timeTotal;
+    var btnPlay, btnPrev, btnNext, btnMute, progress, volumeSlider, timeCurrent, timeTotal;
 
     window.AcetatePlayer = {
         loadTrack: loadTrack,
@@ -30,16 +34,24 @@
         btnPlay = document.getElementById('btn-play');
         btnPrev = document.getElementById('btn-prev');
         btnNext = document.getElementById('btn-next');
+        btnMute = document.getElementById('btn-mute');
         progress = document.getElementById('progress');
+        volumeSlider = document.getElementById('volume');
         timeCurrent = document.getElementById('time-current');
         timeTotal = document.getElementById('time-total');
 
         btnPlay.addEventListener('click', togglePlay);
         btnPrev.addEventListener('click', prevTrack);
         btnNext.addEventListener('click', nextTrack);
+        if (btnMute) btnMute.addEventListener('click', toggleMute);
 
         progress.addEventListener('input', onSeekInput);
         progress.addEventListener('change', onSeekChange);
+        if (volumeSlider) {
+            volumeSlider.addEventListener('input', onVolumeInput);
+            currentVolume = parseFloat(volumeSlider.value) || 1;
+            if (currentVolume > 0) lastNonZeroVolume = currentVolume;
+        }
 
         // Track ended — advance to next
         deckA.addEventListener('ended', onTrackEnded);
@@ -49,6 +61,9 @@
         deckA.addEventListener('loadedmetadata', onMetadata);
         deckB.addEventListener('loadedmetadata', onMetadata);
 
+        applyVolume();
+        updateVolumeUI();
+        setPlayIcon();
         startRAF();
     }
 
@@ -87,7 +102,7 @@
         Acetate.currentTrackIndex = index;
 
         // Set source on active deck
-        activeDeck.src = '/api/stream/' + track.stem;
+        activeDeck.src = streamURL(track.stem);
         activeDeck.load();
 
         // Update UI
@@ -97,7 +112,7 @@
         // Preload next track on inactive deck
         var nextIdx = index + 1;
         if (nextIdx < tracks.length) {
-            inactiveDeck.src = '/api/stream/' + tracks[nextIdx].stem;
+            inactiveDeck.src = streamURL(tracks[nextIdx].stem);
             inactiveDeck.load();
         } else {
             inactiveDeck.src = '';
@@ -111,11 +126,6 @@
         // Update tracklist highlight
         if (typeof AcetateTracklist !== 'undefined') {
             AcetateTracklist.setActive(index);
-        }
-
-        // Record analytics
-        if (typeof AcetateAnalytics !== 'undefined') {
-            AcetateAnalytics.record('play', track.stem);
         }
 
         // Reset progress
@@ -132,21 +142,21 @@
         }
 
         var p = activeDeck.play();
-        if (p) p.catch(function () { });
-        isPlaying = true;
-        btnPlay.innerHTML = '&#x25AE;&#x25AE;';
-        btnPlay.setAttribute('aria-label', 'Pause');
-
-        if (typeof AcetateOscilloscope !== 'undefined') {
-            AcetateOscilloscope.setActiveDeck(activeDeck);
+        if (p && typeof p.then === 'function') {
+            p.then(function () {
+                onPlaybackStarted();
+            }).catch(function () {
+                onPlaybackBlocked();
+            });
+            return;
         }
+        onPlaybackStarted();
     }
 
     function pause() {
         activeDeck.pause();
         isPlaying = false;
-        btnPlay.innerHTML = '&#x25B7;';
-        btnPlay.setAttribute('aria-label', 'Play');
+        setPlayIcon();
 
         if (typeof AcetateAnalytics !== 'undefined' && Acetate.albumData) {
             var track = Acetate.albumData.tracks[Acetate.currentTrackIndex];
@@ -154,6 +164,31 @@
                 AcetateAnalytics.record('pause', track.stem, activeDeck.currentTime);
             }
         }
+    }
+
+    function onPlaybackStarted() {
+        var playTrackIndex = Acetate.currentTrackIndex;
+        var shouldRecordPlay = !isPlaying || playTrackIndex !== lastPlayEventTrack;
+
+        isPlaying = true;
+        setPauseIcon();
+
+        if (typeof AcetateOscilloscope !== 'undefined') {
+            AcetateOscilloscope.setActiveDeck(activeDeck);
+        }
+
+        if (shouldRecordPlay && typeof AcetateAnalytics !== 'undefined' && Acetate.albumData) {
+            var track = Acetate.albumData.tracks[playTrackIndex];
+            if (track) {
+                AcetateAnalytics.record('play', track.stem, activeDeck.currentTime || 0);
+                lastPlayEventTrack = playTrackIndex;
+            }
+        }
+    }
+
+    function onPlaybackBlocked() {
+        isPlaying = false;
+        setPlayIcon();
     }
 
     function togglePlay() {
@@ -220,22 +255,19 @@
             if (typeof AcetateTracklist !== 'undefined') {
                 AcetateTracklist.setActive(next);
             }
-            if (typeof AcetateAnalytics !== 'undefined') {
-                AcetateAnalytics.record('play', nextTrack.stem);
-            }
 
             play();
 
             // Preload the one after
             var preloadIdx = next + 1;
             if (preloadIdx < Acetate.albumData.tracks.length) {
-                inactiveDeck.src = '/api/stream/' + Acetate.albumData.tracks[preloadIdx].stem;
+                inactiveDeck.src = streamURL(Acetate.albumData.tracks[preloadIdx].stem);
                 inactiveDeck.load();
             }
         } else {
             // Album finished
             isPlaying = false;
-            btnPlay.innerHTML = '&#x25B7;';
+            setPlayIcon();
         }
     }
 
@@ -261,6 +293,53 @@
             if (track) {
                 AcetateAnalytics.record('seek', track.stem, activeDeck.currentTime, JSON.stringify({ from: from, to: activeDeck.currentTime }));
             }
+        }
+    }
+
+    function onVolumeInput() {
+        var value = parseFloat(volumeSlider.value);
+        if (isNaN(value)) return;
+
+        currentVolume = clamp(value, 0, 1);
+        if (currentVolume > 0) {
+            isMuted = false;
+            lastNonZeroVolume = currentVolume;
+        } else {
+            isMuted = true;
+        }
+
+        applyVolume();
+        updateVolumeUI();
+    }
+
+    function toggleMute() {
+        if (isMuted || currentVolume === 0) {
+            isMuted = false;
+            if (currentVolume === 0) {
+                currentVolume = lastNonZeroVolume > 0 ? lastNonZeroVolume : 0.8;
+            }
+        } else {
+            isMuted = true;
+        }
+
+        applyVolume();
+        updateVolumeUI();
+    }
+
+    function applyVolume() {
+        var effective = isMuted ? 0 : currentVolume;
+        if (deckA) deckA.volume = effective;
+        if (deckB) deckB.volume = effective;
+    }
+
+    function updateVolumeUI() {
+        if (volumeSlider) {
+            volumeSlider.value = String(currentVolume);
+        }
+        if (btnMute) {
+            var muted = isMuted || currentVolume === 0;
+            btnMute.textContent = muted ? 'MUTE' : 'VOL';
+            btnMute.setAttribute('aria-label', muted ? 'Unmute' : 'Mute');
         }
     }
 
@@ -313,6 +392,32 @@
         var m = Math.floor(seconds / 60);
         var s = Math.floor(seconds % 60);
         return m + ':' + (s < 10 ? '0' : '') + s;
+    }
+
+    function streamURL(stem) {
+        return '/api/stream/' + encodePathSegment(stem);
+    }
+
+    function clamp(value, min, max) {
+        return Math.min(max, Math.max(min, value));
+    }
+
+    function encodePathSegment(value) {
+        return encodeURIComponent(value).replace(/[!'()*]/g, function (ch) {
+            return '%' + ch.charCodeAt(0).toString(16).toUpperCase();
+        });
+    }
+
+    function setPlayIcon() {
+        btnPlay.textContent = '▶';
+        btnPlay.setAttribute('aria-label', 'Play');
+        btnPlay.classList.remove('is-paused');
+    }
+
+    function setPauseIcon() {
+        btnPlay.textContent = '⏸';
+        btnPlay.setAttribute('aria-label', 'Pause');
+        btnPlay.classList.add('is-paused');
     }
 
     document.addEventListener('DOMContentLoaded', init);

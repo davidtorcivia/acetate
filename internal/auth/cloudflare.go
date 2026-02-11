@@ -17,9 +17,10 @@ var cfIPURLs = []string{
 
 // CloudflareIPs holds the known Cloudflare IP ranges for trusted header extraction.
 type CloudflareIPs struct {
-	mu      sync.RWMutex
-	nets    []*net.IPNet
-	done    chan struct{}
+	mu   sync.RWMutex
+	nets []*net.IPNet
+	done chan struct{}
+	once sync.Once
 }
 
 // NewCloudflareIPs fetches Cloudflare IP ranges and starts a refresh goroutine.
@@ -32,7 +33,9 @@ func NewCloudflareIPs() *CloudflareIPs {
 
 // Close stops the refresh goroutine.
 func (cf *CloudflareIPs) Close() {
-	close(cf.done)
+	cf.once.Do(func() {
+		close(cf.done)
+	})
 }
 
 // IsTrusted checks if the given IP is a known Cloudflare IP.
@@ -61,7 +64,10 @@ func (cf *CloudflareIPs) GetClientIP(r *http.Request) string {
 
 	if cf.IsTrusted(remoteIP) {
 		if cfIP := r.Header.Get("CF-Connecting-IP"); cfIP != "" {
-			return cfIP
+			cfIP = strings.TrimSpace(cfIP)
+			if net.ParseIP(cfIP) != nil {
+				return cfIP
+			}
 		}
 	}
 
@@ -87,6 +93,11 @@ func (cf *CloudflareIPs) refresh() {
 			log.Printf("cloudflare: failed to fetch %s: %v", url, err)
 			continue
 		}
+		if resp.StatusCode != http.StatusOK {
+			log.Printf("cloudflare: unexpected status from %s: %s", url, resp.Status)
+			resp.Body.Close()
+			continue
+		}
 		scanner := bufio.NewScanner(resp.Body)
 		for scanner.Scan() {
 			line := strings.TrimSpace(scanner.Text())
@@ -98,6 +109,9 @@ func (cf *CloudflareIPs) refresh() {
 				continue
 			}
 			nets = append(nets, cidr)
+		}
+		if err := scanner.Err(); err != nil {
+			log.Printf("cloudflare: scan %s: %v", url, err)
 		}
 		resp.Body.Close()
 	}

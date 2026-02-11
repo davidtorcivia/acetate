@@ -1,6 +1,7 @@
 // Acetate — Service Worker
-const CACHE_NAME = 'acetate-static-v1';
-const AUDIO_CACHE = 'acetate-audio-v1';
+const CACHE_NAME = 'acetate-static-v2';
+const AUDIO_CACHE = 'acetate-audio-v2';
+let listenerAuthenticated = false;
 
 const STATIC_ASSETS = [
     '/',
@@ -42,12 +43,37 @@ self.addEventListener('activate', function (event) {
     self.clients.claim();
 });
 
+// Track auth state from controlled pages so cached audio is never served to logged-out clients.
+self.addEventListener('message', function (event) {
+    if (!event.data || !event.data.type) return;
+
+    if (event.data.type === 'AUTHENTICATED') {
+        listenerAuthenticated = true;
+        return;
+    }
+
+    if (event.data.type === 'UNAUTHENTICATED') {
+        listenerAuthenticated = false;
+        event.waitUntil(caches.delete(AUDIO_CACHE));
+    }
+});
+
 // Fetch — strategy based on request type
 self.addEventListener('fetch', function (event) {
     var url = new URL(event.request.url);
 
     // MP3 streaming — cache current + next track only (whole file)
-    if (url.pathname.startsWith('/api/stream/')) {
+    if (url.pathname.startsWith('/api/stream/') && event.request.method === 'GET') {
+        var hasRange = event.request.headers.has('Range');
+        var accept = event.request.headers.get('Accept') || '';
+        var isAudioRequest = event.request.destination === 'audio' || accept.indexOf('audio/') !== -1;
+
+        // Never serve cached audio when logged out, non-audio, or handling byte ranges.
+        if (!listenerAuthenticated || !isAudioRequest || hasRange) {
+            event.respondWith(fetch(event.request));
+            return;
+        }
+
         event.respondWith(
             caches.open(AUDIO_CACHE).then(function (cache) {
                 return cache.match(event.request).then(function (cached) {

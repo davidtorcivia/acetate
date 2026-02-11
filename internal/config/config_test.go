@@ -98,3 +98,22 @@ func TestUpdateAndReload(t *testing.T) {
 		t.Errorf("reloaded password = %q, want $2a$10$test", got2.Password)
 	}
 }
+
+func TestGetReturnsDeepCopy(t *testing.T) {
+	albumDir := t.TempDir()
+	dataDir := t.TempDir()
+	os.WriteFile(filepath.Join(albumDir, "01-test.mp3"), []byte("fake"), 0644)
+
+	mgr, err := NewManager(dataDir, albumDir)
+	if err != nil {
+		t.Fatalf("NewManager: %v", err)
+	}
+
+	cfg := mgr.Get()
+	cfg.Tracks[0].Title = "Mutated"
+
+	fresh := mgr.Get()
+	if fresh.Tracks[0].Title == "Mutated" {
+		t.Fatal("Get should return a deep copy of tracks")
+	}
+}

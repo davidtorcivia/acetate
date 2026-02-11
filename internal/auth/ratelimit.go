@@ -15,6 +15,7 @@ type RateLimiter struct {
 	mu      sync.Mutex
 	windows map[string]*window
 	done    chan struct{}
+	once    sync.Once
 }
 
 type window struct {
@@ -33,7 +34,9 @@ func NewRateLimiter() *RateLimiter {
 
 // Close stops the cleanup goroutine.
 func (rl *RateLimiter) Close() {
-	close(rl.done)
+	rl.once.Do(func() {
+		close(rl.done)
+	})
 }
 
 // Allow checks if the given IP is within the rate limit.

@@ -4,8 +4,12 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
+	"io"
 	"log"
 	"net/http"
+	"net/url"
+	"strings"
 	"time"
 
 	"acetate/internal/analytics"
@@ -138,3 +142,34 @@ func bodyLimiter(maxBytes int64) func(http.Handler) http.Handler {
 	}
 }
 
+func decodeJSONBody(r *http.Request, dst interface{}) error {
+	dec := json.NewDecoder(r.Body)
+	dec.DisallowUnknownFields()
+
+	if err := dec.Decode(dst); err != nil {
+		return err
+	}
+
+	var extra struct{}
+	if err := dec.Decode(&extra); !errors.Is(err, io.EOF) {
+		return errors.New("invalid JSON payload")
+	}
+
+	return nil
+}
+
+func isSecureRequest(r *http.Request) bool {
+	return requestScheme(r) == "https"
+}
+
+func trimAndCollapseSpaces(s string) string {
+	return strings.Join(strings.Fields(strings.TrimSpace(s)), " ")
+}
+
+func normalizeStemParam(raw string) (string, error) {
+	stem, err := url.PathUnescape(raw)
+	if err != nil {
+		return "", err
+	}
+	return strings.TrimSpace(stem), nil
+}

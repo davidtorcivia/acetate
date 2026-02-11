@@ -9,6 +9,9 @@
     var dataArray = null;
     var currentSource = null;
     var initialized = false;
+    var drawWidth = 0, drawHeight = 0;
+    var energyEMA = 0;
+    var gainEMA = 1;
 
     window.AcetateOscilloscope = {
         init: initAudio,
@@ -31,7 +34,10 @@
         var rect = canvas.getBoundingClientRect();
         canvas.width = rect.width * dpr;
         canvas.height = rect.height * dpr;
+        ctx.setTransform(1, 0, 0, 1, 0, 0);
         ctx.scale(dpr, dpr);
+        drawWidth = rect.width;
+        drawHeight = rect.height;
     }
 
     function initAudio(deckA, deckB) {
@@ -85,18 +91,21 @@
     function draw(isPlaying) {
         if (!canvas || !ctx) return;
 
-        var width = canvas.getBoundingClientRect().width;
-        var height = canvas.getBoundingClientRect().height;
+        var width = drawWidth || canvas.getBoundingClientRect().width;
+        var height = drawHeight || canvas.getBoundingClientRect().height;
+        var midY = height / 2;
 
         ctx.clearRect(0, 0, width, height);
-        ctx.lineWidth = 1.2;
-        ctx.strokeStyle = getComputedStyle(document.documentElement)
+        var accent = getComputedStyle(document.documentElement)
             .getPropertyValue('--accent').trim() || '#8a7a5a';
-        ctx.beginPath();
 
         if (!isPlaying || !analyser || !dataArray) {
             // Flat line — held breath
-            var midY = height / 2;
+            energyEMA *= 0.9;
+            gainEMA += (1 - gainEMA) * 0.12;
+            ctx.lineWidth = 1.15;
+            ctx.strokeStyle = accent;
+            ctx.beginPath();
             ctx.moveTo(0, midY);
             ctx.lineTo(width, midY);
             ctx.stroke();
@@ -105,22 +114,79 @@
 
         analyser.getByteTimeDomainData(dataArray);
 
-        var sliceWidth = width / dataArray.length;
+        var points = sampleWaveform(width, height, midY);
+        if (points.length < 2) {
+            return;
+        }
+
+        // A subtle under-stroke adds depth without glow/neon treatment.
+        ctx.lineJoin = 'round';
+        ctx.lineCap = 'round';
+        ctx.strokeStyle = accent;
+        ctx.globalAlpha = 0.24 + Math.min(0.2, energyEMA * 2.5);
+        ctx.lineWidth = 2.15;
+        strokeSmoothPath(points);
+
+        ctx.globalAlpha = 0.95;
+        ctx.lineWidth = 1.15;
+        strokeSmoothPath(points);
+        ctx.globalAlpha = 1;
+    }
+
+    function sampleWaveform(width, height, midY) {
+        var length = dataArray.length;
+        var maxPoints = Math.min(360, Math.max(120, Math.floor(width * 0.8)));
+        var step = Math.max(1, Math.floor(length / maxPoints));
+
+        var rmsAccum = 0;
+        var count = 0;
+        var i = 0;
+        for (i = 0; i < length; i += step) {
+            var centered = (dataArray[i] - 128) / 128;
+            rmsAccum += centered * centered;
+            count++;
+        }
+
+        var rms = count > 0 ? Math.sqrt(rmsAccum / count) : 0;
+        energyEMA += (rms - energyEMA) * 0.16;
+
+        // Adaptive gain keeps quiet passages visible while preserving loud transients.
+        var targetGain = clamp(0.95 + (0.18 - energyEMA) * 2.2, 0.85, 1.8);
+        gainEMA += (targetGain - gainEMA) * 0.11;
+
+        var points = [];
         var x = 0;
+        var sliceWidth = width / Math.ceil(length / step);
 
-        for (var i = 0; i < dataArray.length; i++) {
-            var v = dataArray[i] / 128.0;
-            var y = (v * height) / 2;
-
-            if (i === 0) {
-                ctx.moveTo(x, y);
-            } else {
-                ctx.lineTo(x, y);
-            }
+        for (i = 0; i < length; i += step) {
+            var v = (dataArray[i] - 128) / 128;
+            var y = midY + v * (height * 0.44) * gainEMA;
+            points.push({ x: x, y: y });
             x += sliceWidth;
         }
 
+        return points;
+    }
+
+    function strokeSmoothPath(points) {
+        if (!points.length) return;
+
+        ctx.beginPath();
+        ctx.moveTo(points[0].x, points[0].y);
+
+        for (var i = 1; i < points.length - 1; i++) {
+            var xc = (points[i].x + points[i + 1].x) / 2;
+            var yc = (points[i].y + points[i + 1].y) / 2;
+            ctx.quadraticCurveTo(points[i].x, points[i].y, xc, yc);
+        }
+
+        var last = points[points.length - 1];
+        ctx.lineTo(last.x, last.y);
         ctx.stroke();
+    }
+
+    function clamp(value, min, max) {
+        return Math.min(max, Math.max(min, value));
     }
 
     document.addEventListener('DOMContentLoaded', initCanvas);

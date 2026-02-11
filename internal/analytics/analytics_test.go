@@ -1,6 +1,7 @@
 package analytics
 
 import (
+	"encoding/json"
 	"testing"
 	"time"
 
@@ -177,5 +178,48 @@ func TestGetTrackStats(t *testing.T) {
 	}
 	if s.CompletionRate != 0.5 {
 		t.Errorf("completion rate = %f, want 0.5", s.CompletionRate)
+	}
+}
+
+func TestRecordBatchRejectsOversizedBatch(t *testing.T) {
+	c := testCollector(t)
+
+	events := make([]map[string]string, MaxBatchSize+1)
+	for i := range events {
+		events[i] = map[string]string{"event_type": "heartbeat"}
+	}
+	data, _ := json.Marshal(events)
+
+	if err := c.RecordBatch("sess1", data); err == nil {
+		t.Fatal("expected oversized batch error")
+	}
+}
+
+func TestRecordBatchSkipsInvalidEvents(t *testing.T) {
+	dir := t.TempDir()
+	db, err := database.Open(dir)
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	defer db.Close()
+
+	c := NewCollector(db)
+
+	data := []byte(`[
+		{"event_type":"play","track_stem":"01-gathering"},
+		{"event_type":"bogus","track_stem":"01-gathering"},
+		{"event_type":"pause","track_stem":"../../etc/passwd"}
+	]`)
+	if err := c.RecordBatch("sess1", data); err != nil {
+		t.Fatalf("RecordBatch: %v", err)
+	}
+	c.Close()
+
+	var count int
+	if err := db.QueryRow("SELECT COUNT(*) FROM events WHERE session_id='sess1'").Scan(&count); err != nil {
+		t.Fatalf("query count: %v", err)
+	}
+	if count != 1 {
+		t.Fatalf("expected 1 valid event, got %d", count)
 	}
 }

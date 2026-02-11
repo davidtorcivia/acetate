@@ -3,10 +3,13 @@ package analytics
 import (
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"log"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
+	"unicode"
 )
 
 const (
@@ -14,6 +17,8 @@ const (
 	FlushSize     = 50
 	FlushInterval = 5 * time.Second
 	DrainTimeout  = 10 * time.Second
+	MaxBatchSize  = 500
+	MaxMetaBytes  = 4096
 )
 
 // Event represents an analytics event from the client.
@@ -33,12 +38,24 @@ var highValueEvents = map[string]bool{
 	"session_end":   true,
 }
 
+var validEventTypes = map[string]bool{
+	"play":          true,
+	"pause":         true,
+	"seek":          true,
+	"complete":      true,
+	"dropout":       true,
+	"heartbeat":     true,
+	"session_start": true,
+	"session_end":   true,
+}
+
 // Collector manages buffered analytics event ingestion.
 type Collector struct {
 	db      *sql.DB
 	events  chan Event
 	done    chan struct{}
 	wg      sync.WaitGroup
+	once    sync.Once
 	dropped atomic.Int64
 }
 
@@ -79,13 +96,15 @@ func (c *Collector) DroppedCount() int64 {
 
 // Close stops the collector and drains remaining events.
 func (c *Collector) Close() {
-	close(c.done)
-	c.wg.Wait()
+	c.once.Do(func() {
+		close(c.done)
+		c.wg.Wait()
 
-	// Log dropped events
-	if d := c.dropped.Load(); d > 0 {
-		log.Printf("analytics: %d events dropped due to backpressure", d)
-	}
+		// Log dropped events
+		if d := c.dropped.Load(); d > 0 {
+			log.Printf("analytics: %d events dropped due to backpressure", d)
+		}
+	})
 }
 
 func (c *Collector) flushLoop() {
@@ -184,8 +203,24 @@ func (c *Collector) RecordBatch(sessionID string, data []byte) error {
 	if err := json.Unmarshal(data, &events); err != nil {
 		return err
 	}
+	if len(events) > MaxBatchSize {
+		return errors.New("too many events")
+	}
 
 	for _, e := range events {
+		if !validEventTypes[e.EventType] {
+			continue
+		}
+		if e.TrackStem != "" && !validTrackStem(e.TrackStem) {
+			continue
+		}
+		if e.PositionSeconds < 0 || e.PositionSeconds > 24*60*60 {
+			continue
+		}
+		if len(e.Metadata) > MaxMetaBytes {
+			continue
+		}
+
 		meta := ""
 		if len(e.Metadata) > 0 {
 			meta = string(e.Metadata)
@@ -200,4 +235,25 @@ func (c *Collector) RecordBatch(sessionID string, data []byte) error {
 	}
 
 	return nil
+}
+
+func validTrackStem(stem string) bool {
+	stem = strings.TrimSpace(stem)
+	if stem == "" || len(stem) > 255 {
+		return false
+	}
+	if strings.ContainsAny(stem, `/\.`) {
+		return false
+	}
+	if stem == "." || stem == ".." {
+		return false
+	}
+
+	for _, r := range stem {
+		if unicode.IsControl(r) || r == 0 {
+			return false
+		}
+	}
+
+	return true
 }
