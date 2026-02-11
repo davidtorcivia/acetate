@@ -1,6 +1,6 @@
 // Acetate — Service Worker
-const CACHE_NAME = 'acetate-static-v2';
-const AUDIO_CACHE = 'acetate-audio-v2';
+const CACHE_NAME = 'acetate-static-v12';
+const AUDIO_CACHE = 'acetate-audio-v12';
 let listenerAuthenticated = false;
 
 const STATIC_ASSETS = [

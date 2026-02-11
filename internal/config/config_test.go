@@ -1,6 +1,7 @@
 package config
 
 import (
+	"encoding/binary"
 	"os"
 	"path/filepath"
 	"testing"
@@ -61,6 +62,42 @@ func TestGenerateDefault(t *testing.T) {
 	}
 }
 
+func TestGenerateDefaultPrefersMetadataTitle(t *testing.T) {
+	albumDir := t.TempDir()
+	dataDir := t.TempDir()
+
+	taggedPath := filepath.Join(albumDir, "01-tagged.mp3")
+	if err := os.WriteFile(taggedPath, makeID3v23TaggedMP3("A Real Track Name"), 0644); err != nil {
+		t.Fatalf("write tagged mp3: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(albumDir, "02-fallback.mp3"), []byte("fake"), 0644); err != nil {
+		t.Fatalf("write fallback mp3: %v", err)
+	}
+
+	mgr, err := NewManager(dataDir, albumDir)
+	if err != nil {
+		t.Fatalf("NewManager: %v", err)
+	}
+
+	cfg := mgr.Get()
+	if len(cfg.Tracks) != 2 {
+		t.Fatalf("expected 2 tracks, got %d", len(cfg.Tracks))
+	}
+
+	if cfg.Tracks[0].Stem != "01-tagged" {
+		t.Fatalf("first stem = %q, want 01-tagged", cfg.Tracks[0].Stem)
+	}
+	if cfg.Tracks[0].Title != "A Real Track Name" {
+		t.Errorf("metadata title = %q, want A Real Track Name", cfg.Tracks[0].Title)
+	}
+	if cfg.Tracks[1].Stem != "02-fallback" {
+		t.Fatalf("second stem = %q, want 02-fallback", cfg.Tracks[1].Stem)
+	}
+	if cfg.Tracks[1].Title != "Fallback" {
+		t.Errorf("fallback title = %q, want Fallback", cfg.Tracks[1].Title)
+	}
+}
+
 func TestUpdateAndReload(t *testing.T) {
 	albumDir := t.TempDir()
 	dataDir := t.TempDir()
@@ -116,4 +153,27 @@ func TestGetReturnsDeepCopy(t *testing.T) {
 	if fresh.Tracks[0].Title == "Mutated" {
 		t.Fatal("Get should return a deep copy of tracks")
 	}
+}
+
+func makeID3v23TaggedMP3(title string) []byte {
+	payload := append([]byte{0x03}, []byte(title)...) // UTF-8
+
+	frame := make([]byte, 10+len(payload))
+	copy(frame[0:4], []byte("TIT2"))
+	binary.BigEndian.PutUint32(frame[4:8], uint32(len(payload)))
+	copy(frame[10:], payload)
+
+	tagSize := len(frame)
+	header := []byte{
+		'I', 'D', '3',
+		0x03, 0x00, 0x00, // v2.3.0, flags 0
+		byte((tagSize >> 21) & 0x7f),
+		byte((tagSize >> 14) & 0x7f),
+		byte((tagSize >> 7) & 0x7f),
+		byte(tagSize & 0x7f),
+	}
+
+	data := append(header, frame...)
+	data = append(data, []byte{0x00, 0x00, 0x00, 0x00}...) // fake audio bytes
+	return data
 }

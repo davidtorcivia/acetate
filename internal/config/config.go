@@ -1,14 +1,18 @@
 package config
 
 import (
+	"bytes"
+	"encoding/binary"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"regexp"
 	"sort"
 	"strings"
 	"sync"
+	"unicode/utf16"
 )
 
 // Track represents a single track in the album.
@@ -137,7 +141,7 @@ func (m *Manager) generateDefault(albumPath string) error {
 		}
 
 		stem := strings.TrimSuffix(name, filepath.Ext(name))
-		title := deriveTitle(stem)
+		title := deriveTitleFromMetadata(filepath.Join(albumPath, name), stem)
 		tracks = append(tracks, Track{Stem: stem, Title: title})
 	}
 
@@ -152,6 +156,210 @@ func (m *Manager) generateDefault(albumPath string) error {
 	}
 
 	return m.save(&cfg)
+}
+
+func deriveTitleFromMetadata(mp3Path, stem string) string {
+	if title, err := readMP3Title(mp3Path); err == nil {
+		title = strings.TrimSpace(title)
+		if title != "" {
+			return title
+		}
+	}
+	return deriveTitle(stem)
+}
+
+func readMP3Title(path string) (string, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return "", err
+	}
+	defer f.Close()
+
+	stat, err := f.Stat()
+	if err != nil {
+		return "", err
+	}
+
+	// Try ID3v2 first (header at start of file).
+	if title, ok, err := readID3v2Title(f); err != nil {
+		return "", err
+	} else if ok {
+		return title, nil
+	}
+
+	// Fallback to ID3v1 (TAG block at end of file).
+	if stat.Size() >= 128 {
+		if title, ok, err := readID3v1Title(f, stat.Size()); err != nil {
+			return "", err
+		} else if ok {
+			return title, nil
+		}
+	}
+
+	return "", nil
+}
+
+func readID3v2Title(rs io.ReadSeeker) (string, bool, error) {
+	if _, err := rs.Seek(0, io.SeekStart); err != nil {
+		return "", false, err
+	}
+
+	header := make([]byte, 10)
+	if _, err := io.ReadFull(rs, header); err != nil {
+		if err == io.EOF || err == io.ErrUnexpectedEOF {
+			return "", false, nil
+		}
+		return "", false, err
+	}
+	if !bytes.Equal(header[:3], []byte("ID3")) {
+		return "", false, nil
+	}
+
+	version := header[3]
+	tagSize := decodeSyncSafeInt(header[6:10])
+	if tagSize <= 0 {
+		return "", false, nil
+	}
+
+	tagData := make([]byte, tagSize)
+	if _, err := io.ReadFull(rs, tagData); err != nil {
+		return "", false, nil
+	}
+
+	title := extractID3v2Title(version, tagData)
+	if strings.TrimSpace(title) == "" {
+		return "", false, nil
+	}
+	return strings.TrimSpace(title), true, nil
+}
+
+func readID3v1Title(rs io.ReadSeeker, fileSize int64) (string, bool, error) {
+	if _, err := rs.Seek(fileSize-128, io.SeekStart); err != nil {
+		return "", false, err
+	}
+	buf := make([]byte, 128)
+	if _, err := io.ReadFull(rs, buf); err != nil {
+		return "", false, err
+	}
+	if !bytes.Equal(buf[:3], []byte("TAG")) {
+		return "", false, nil
+	}
+
+	title := strings.TrimRight(string(buf[3:33]), "\x00 ")
+	title = strings.TrimSpace(title)
+	if title == "" {
+		return "", false, nil
+	}
+	return title, true, nil
+}
+
+func decodeSyncSafeInt(b []byte) int {
+	if len(b) < 4 {
+		return 0
+	}
+	return int(b[0]&0x7f)<<21 | int(b[1]&0x7f)<<14 | int(b[2]&0x7f)<<7 | int(b[3]&0x7f)
+}
+
+func extractID3v2Title(version byte, data []byte) string {
+	pos := 0
+	for pos+10 <= len(data) {
+		frameHeader := data[pos : pos+10]
+		if bytes.Equal(frameHeader, make([]byte, 10)) {
+			break
+		}
+
+		frameID := string(frameHeader[:4])
+		if strings.TrimSpace(frameID) == "" {
+			break
+		}
+
+		var frameSize int
+		if version == 4 {
+			frameSize = decodeSyncSafeInt(frameHeader[4:8])
+		} else {
+			frameSize = int(binary.BigEndian.Uint32(frameHeader[4:8]))
+		}
+		if frameSize <= 0 {
+			pos += 10
+			continue
+		}
+
+		start := pos + 10
+		end := start + frameSize
+		if end > len(data) {
+			break
+		}
+
+		if frameID == "TIT2" {
+			return decodeID3TextFrame(data[start:end])
+		}
+
+		pos = end
+	}
+	return ""
+}
+
+func decodeID3TextFrame(frame []byte) string {
+	if len(frame) == 0 {
+		return ""
+	}
+
+	encoding := frame[0]
+	payload := frame[1:]
+	if len(payload) == 0 {
+		return ""
+	}
+
+	switch encoding {
+	case 0: // ISO-8859-1
+		if i := bytes.IndexByte(payload, 0); i >= 0 {
+			payload = payload[:i]
+		}
+		return strings.TrimSpace(string(payload))
+	case 3: // UTF-8
+		if i := bytes.IndexByte(payload, 0); i >= 0 {
+			payload = payload[:i]
+		}
+		return strings.TrimSpace(string(payload))
+	case 1, 2: // UTF-16 (with BOM for 1, BE for 2)
+		return decodeUTF16Text(payload, encoding == 1)
+	default:
+		return ""
+	}
+}
+
+func decodeUTF16Text(payload []byte, withBOM bool) string {
+	if len(payload) < 2 {
+		return ""
+	}
+
+	var order binary.ByteOrder = binary.BigEndian
+	start := 0
+	if withBOM && len(payload) >= 2 {
+		switch {
+		case payload[0] == 0xff && payload[1] == 0xfe:
+			order = binary.LittleEndian
+			start = 2
+		case payload[0] == 0xfe && payload[1] == 0xff:
+			order = binary.BigEndian
+			start = 2
+		}
+	}
+
+	payload = payload[start:]
+	u16 := make([]uint16, 0, len(payload)/2)
+	for i := 0; i+1 < len(payload); i += 2 {
+		v := order.Uint16(payload[i : i+2])
+		if v == 0 {
+			break
+		}
+		u16 = append(u16, v)
+	}
+	if len(u16) == 0 {
+		return ""
+	}
+
+	return strings.TrimSpace(string(utf16.Decode(u16)))
 }
 
 // deriveTitle converts a stem like "01-gathering" to "Gathering".

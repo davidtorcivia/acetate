@@ -213,6 +213,8 @@ body::after {
     position: relative;
     mask-image: linear-gradient(to bottom, transparent 0%, black 8%, black 92%, transparent 100%);
     -webkit-mask-image: linear-gradient(to bottom, transparent 0%, black 8%, black 92%, transparent 100%);
+    -ms-overflow-style: none;
+    scrollbar-width: none;
 }
 
 .lyrics {
@@ -225,17 +227,41 @@ body::after {
 }
 
 .lyrics .line {
-    padding: 4px 0;
-    transition: color 0.4s ease, opacity 0.4s ease;
+    padding: 1px 0;
+    color: var(--text-dim);
+    opacity: 0.55;
+    transition: color 0.1s linear, opacity 0.1s linear;
 }
 
 .lyrics .line.active {
     color: var(--text);
     opacity: 1;
+    text-shadow: 0 0 10px rgba(212, 207, 196, 0.18);
 }
 
 .lyrics .line-group {
-    padding: 4px 0;
+    padding: 1px 0;
+}
+
+.lyrics .section-label {
+    font-family: var(--sans);
+    font-size: 0.68rem;
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+    color: rgba(212, 207, 196, 0.46);
+    margin: 0.2rem 0 0.35rem;
+}
+
+.lyrics .line-group.section-break {
+    margin-top: 0.95rem;
+}
+
+.lyrics .line-group.active-group .line {
+    opacity: 0.82;
+}
+
+.lyrics .line-group.active-group .line.active {
+    opacity: 1;
 }
 
 .lyrics .no-lyrics {
@@ -476,17 +502,20 @@ body::after {
 }
 
 /* Scrollbar */
-.lyrics-container::-webkit-scrollbar,
+.lyrics-container::-webkit-scrollbar {
+    width: 0;
+    height: 0;
+    display: none;
+}
+
 .tracklist::-webkit-scrollbar {
     width: 4px;
 }
 
-.lyrics-container::-webkit-scrollbar-track,
 .tracklist::-webkit-scrollbar-track {
     background: transparent;
 }
 
-.lyrics-container::-webkit-scrollbar-thumb,
 .tracklist::-webkit-scrollbar-thumb {
     background: var(--border);
     border-radius: 2px;
@@ -549,13 +578,12 @@ body::after {
         padding: 36px 32px 24px;
         display: grid;
         grid-template-columns: minmax(360px, 440px) minmax(520px, 680px);
-        grid-template-rows: auto auto auto auto auto minmax(0, 1fr);
+        grid-template-rows: auto auto auto auto minmax(0, 1fr);
         grid-template-areas:
             "cover lyrics"
             "scope lyrics"
             "title lyrics"
             "controls lyrics"
-            "toggle lyrics"
             "tracklist lyrics";
         column-gap: 56px;
         row-gap: 6px;
@@ -589,17 +617,19 @@ body::after {
     }
 
     .tracklist-toggle {
-        grid-area: toggle;
-        text-align: left;
-        padding-top: 8px;
+        display: none;
     }
 
     .tracklist {
         grid-area: tracklist;
+        min-height: 0;
+        max-height: none;
+        transition: none;
     }
 
+    .tracklist.collapsed,
     .tracklist.expanded {
-        max-height: 240px;
+        max-height: none;
     }
 
     .lyrics-container {
