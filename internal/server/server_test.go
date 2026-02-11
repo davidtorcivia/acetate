@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -130,6 +131,27 @@ func (env *testEnv) authenticateAdmin(t *testing.T) []*http.Cookie {
 	}
 
 	return resp.Cookies()
+}
+
+func (env *testEnv) authenticateAdminAs(t *testing.T, username, password string) ([]*http.Cookie, map[string]interface{}, int) {
+	t.Helper()
+
+	body, _ := json.Marshal(map[string]string{
+		"username": username,
+		"password": password,
+	})
+	req, _ := http.NewRequest(http.MethodPost, env.ts.URL+"/admin/api/auth", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Origin", env.ts.URL)
+	resp, err := env.ts.Client().Do(req)
+	if err != nil {
+		t.Fatalf("admin auth request: %v", err)
+	}
+	defer resp.Body.Close()
+
+	payload := map[string]interface{}{}
+	_ = json.NewDecoder(resp.Body).Decode(&payload)
+	return resp.Cookies(), payload, resp.StatusCode
 }
 
 func TestAuthFlow(t *testing.T) {
@@ -561,6 +583,24 @@ func TestSPAFallback(t *testing.T) {
 	}
 }
 
+func TestSecurityHeadersDoNotAllowInlineStyles(t *testing.T) {
+	env := setupTest(t)
+
+	resp, err := env.ts.Client().Get(env.ts.URL + "/")
+	if err != nil {
+		t.Fatalf("request: %v", err)
+	}
+	defer resp.Body.Close()
+
+	csp := resp.Header.Get("Content-Security-Policy")
+	if csp == "" {
+		t.Fatal("expected Content-Security-Policy header")
+	}
+	if strings.Contains(csp, "'unsafe-inline'") {
+		t.Fatalf("unexpected unsafe-inline in CSP: %q", csp)
+	}
+}
+
 func TestAnalyticsEndpoint(t *testing.T) {
 	env := setupTest(t)
 	cookies := env.authenticate(t)
@@ -705,6 +745,214 @@ func TestAdminUpdateOwnPassword(t *testing.T) {
 	newAuthResp.Body.Close()
 	if newAuthResp.StatusCode != http.StatusOK {
 		t.Fatalf("new password auth status = %d, want 200", newAuthResp.StatusCode)
+	}
+}
+
+func TestAdminAuthLockoutAfterRepeatedFailures(t *testing.T) {
+	env := setupTest(t)
+
+	for i := 0; i < 5; i++ {
+		_, _, status := env.authenticateAdminAs(t, testAdminUsername, "wrong-password")
+		if status != http.StatusUnauthorized {
+			t.Fatalf("attempt %d status = %d, want 401", i+1, status)
+		}
+	}
+
+	_, _, status := env.authenticateAdminAs(t, testAdminUsername, "wrong-password")
+	if status != http.StatusTooManyRequests {
+		t.Fatalf("locked attempt status = %d, want 429", status)
+	}
+
+	_, _, status = env.authenticateAdminAs(t, testAdminUsername, testAdminPassword)
+	if status != http.StatusTooManyRequests {
+		t.Fatalf("locked correct-password attempt status = %d, want 429", status)
+	}
+}
+
+func TestAdminUserManagementAndForcedPasswordResetFlow(t *testing.T) {
+	env := setupTest(t)
+	adminCookies := env.authenticateAdmin(t)
+
+	var baseAdminID int64
+	if err := env.srv.db.QueryRow("SELECT id FROM admin_users WHERE username = ?", testAdminUsername).Scan(&baseAdminID); err != nil {
+		t.Fatalf("query base admin id: %v", err)
+	}
+
+	// Cannot deactivate own account.
+	selfDeactivateBody, _ := json.Marshal(map[string]interface{}{
+		"is_active": false,
+	})
+	selfDeactivateReq, _ := http.NewRequest(http.MethodPut, env.ts.URL+"/admin/api/admin-users/"+strconv.FormatInt(baseAdminID, 10), bytes.NewReader(selfDeactivateBody))
+	selfDeactivateReq.Header.Set("Content-Type", "application/json")
+	selfDeactivateReq.Header.Set("Origin", env.ts.URL)
+	for _, c := range adminCookies {
+		selfDeactivateReq.AddCookie(c)
+	}
+	selfDeactivateResp, err := env.ts.Client().Do(selfDeactivateReq)
+	if err != nil {
+		t.Fatalf("self deactivate request: %v", err)
+	}
+	selfDeactivateResp.Body.Close()
+	if selfDeactivateResp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("self deactivate status = %d, want 400", selfDeactivateResp.StatusCode)
+	}
+
+	// Create second admin and require password reset.
+	createBody, _ := json.Marshal(map[string]interface{}{
+		"username":               "opsadmin",
+		"password":               "ops-admin-pass-123",
+		"require_password_reset": true,
+	})
+	createReq, _ := http.NewRequest(http.MethodPost, env.ts.URL+"/admin/api/admin-users", bytes.NewReader(createBody))
+	createReq.Header.Set("Content-Type", "application/json")
+	createReq.Header.Set("Origin", env.ts.URL)
+	for _, c := range adminCookies {
+		createReq.AddCookie(c)
+	}
+	createResp, err := env.ts.Client().Do(createReq)
+	if err != nil {
+		t.Fatalf("create admin user request: %v", err)
+	}
+	if createResp.StatusCode != http.StatusCreated {
+		createResp.Body.Close()
+		t.Fatalf("create admin user status = %d, want 201", createResp.StatusCode)
+	}
+	var created struct {
+		ID                   int64  `json:"id"`
+		Username             string `json:"username"`
+		RequirePasswordReset bool   `json:"require_password_reset"`
+	}
+	if err := json.NewDecoder(createResp.Body).Decode(&created); err != nil {
+		createResp.Body.Close()
+		t.Fatalf("decode created admin user: %v", err)
+	}
+	createResp.Body.Close()
+	if created.ID <= 0 || created.Username != "opsadmin" || !created.RequirePasswordReset {
+		t.Fatalf("unexpected created admin user payload: %+v", created)
+	}
+
+	// New admin is forced into password-reset mode.
+	opsCookies, authPayload, status := env.authenticateAdminAs(t, "opsadmin", "ops-admin-pass-123")
+	if status != http.StatusOK {
+		t.Fatalf("ops admin login status = %d, want 200", status)
+	}
+	if resetRaw, ok := authPayload["password_reset_required"].(bool); !ok || !resetRaw {
+		t.Fatalf("expected password_reset_required=true, got payload=%v", authPayload)
+	}
+
+	analyticsReq, _ := http.NewRequest(http.MethodGet, env.ts.URL+"/admin/api/analytics", nil)
+	for _, c := range opsCookies {
+		analyticsReq.AddCookie(c)
+	}
+	analyticsResp, err := env.ts.Client().Do(analyticsReq)
+	if err != nil {
+		t.Fatalf("analytics request in reset mode: %v", err)
+	}
+	analyticsResp.Body.Close()
+	if analyticsResp.StatusCode != http.StatusForbidden {
+		t.Fatalf("analytics status in reset mode = %d, want 403", analyticsResp.StatusCode)
+	}
+
+	configReq, _ := http.NewRequest(http.MethodGet, env.ts.URL+"/admin/api/config", nil)
+	for _, c := range opsCookies {
+		configReq.AddCookie(c)
+	}
+	configResp, err := env.ts.Client().Do(configReq)
+	if err != nil {
+		t.Fatalf("config request in reset mode: %v", err)
+	}
+	if configResp.StatusCode != http.StatusOK {
+		configResp.Body.Close()
+		t.Fatalf("config status in reset mode = %d, want 200", configResp.StatusCode)
+	}
+	var configPayload struct {
+		PasswordResetRequired bool `json:"password_reset_required"`
+	}
+	if err := json.NewDecoder(configResp.Body).Decode(&configPayload); err != nil {
+		configResp.Body.Close()
+		t.Fatalf("decode config payload: %v", err)
+	}
+	configResp.Body.Close()
+	if !configPayload.PasswordResetRequired {
+		t.Fatal("expected password_reset_required=true in config")
+	}
+
+	updatePassBody, _ := json.Marshal(map[string]string{
+		"current_password": "ops-admin-pass-123",
+		"new_password":     "ops-admin-pass-456",
+	})
+	updatePassReq, _ := http.NewRequest(http.MethodPut, env.ts.URL+"/admin/api/admin-password", bytes.NewReader(updatePassBody))
+	updatePassReq.Header.Set("Content-Type", "application/json")
+	updatePassReq.Header.Set("Origin", env.ts.URL)
+	for _, c := range opsCookies {
+		updatePassReq.AddCookie(c)
+	}
+	updatePassResp, err := env.ts.Client().Do(updatePassReq)
+	if err != nil {
+		t.Fatalf("update ops admin password request: %v", err)
+	}
+	updatePassResp.Body.Close()
+	if updatePassResp.StatusCode != http.StatusOK {
+		t.Fatalf("update ops admin password status = %d, want 200", updatePassResp.StatusCode)
+	}
+
+	// Session is revoked after password change.
+	oldSessionConfigReq, _ := http.NewRequest(http.MethodGet, env.ts.URL+"/admin/api/config", nil)
+	for _, c := range opsCookies {
+		oldSessionConfigReq.AddCookie(c)
+	}
+	oldSessionConfigResp, err := env.ts.Client().Do(oldSessionConfigReq)
+	if err != nil {
+		t.Fatalf("old-session config request: %v", err)
+	}
+	oldSessionConfigResp.Body.Close()
+	if oldSessionConfigResp.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("old-session config status = %d, want 401", oldSessionConfigResp.StatusCode)
+	}
+
+	newOpsCookies, newAuthPayload, status := env.authenticateAdminAs(t, "opsadmin", "ops-admin-pass-456")
+	if status != http.StatusOK {
+		t.Fatalf("ops admin relogin status = %d, want 200", status)
+	}
+	if resetRaw, ok := newAuthPayload["password_reset_required"].(bool); !ok || resetRaw {
+		t.Fatalf("expected password_reset_required=false, got payload=%v", newAuthPayload)
+	}
+
+	analyticsReq2, _ := http.NewRequest(http.MethodGet, env.ts.URL+"/admin/api/analytics", nil)
+	for _, c := range newOpsCookies {
+		analyticsReq2.AddCookie(c)
+	}
+	analyticsResp2, err := env.ts.Client().Do(analyticsReq2)
+	if err != nil {
+		t.Fatalf("analytics request after reset: %v", err)
+	}
+	analyticsResp2.Body.Close()
+	if analyticsResp2.StatusCode != http.StatusOK {
+		t.Fatalf("analytics status after reset = %d, want 200", analyticsResp2.StatusCode)
+	}
+
+	// Active admin can deactivate another account.
+	deactivateBody, _ := json.Marshal(map[string]interface{}{
+		"is_active": false,
+	})
+	deactivateReq, _ := http.NewRequest(http.MethodPut, env.ts.URL+"/admin/api/admin-users/"+strconv.FormatInt(created.ID, 10), bytes.NewReader(deactivateBody))
+	deactivateReq.Header.Set("Content-Type", "application/json")
+	deactivateReq.Header.Set("Origin", env.ts.URL)
+	for _, c := range adminCookies {
+		deactivateReq.AddCookie(c)
+	}
+	deactivateResp, err := env.ts.Client().Do(deactivateReq)
+	if err != nil {
+		t.Fatalf("deactivate ops admin request: %v", err)
+	}
+	deactivateResp.Body.Close()
+	if deactivateResp.StatusCode != http.StatusOK {
+		t.Fatalf("deactivate ops admin status = %d, want 200", deactivateResp.StatusCode)
+	}
+
+	_, _, status = env.authenticateAdminAs(t, "opsadmin", "ops-admin-pass-456")
+	if status != http.StatusUnauthorized {
+		t.Fatalf("disabled admin login status = %d, want 401", status)
 	}
 }
 

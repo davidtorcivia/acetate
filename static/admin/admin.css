@@ -248,6 +248,13 @@ button:hover { background: #444; }
     border-radius: 2px;
 }
 
+.heatmap-level-0 { background: #2a2a2a; }
+.heatmap-level-1 { background: #4c2e2e; }
+.heatmap-level-2 { background: #6a2f2f; }
+.heatmap-level-3 { background: #8d3131; }
+.heatmap-level-4 { background: #b83a3a; }
+.heatmap-level-5 { background: #e14a4a; }
+
 /* Status messages */
 .status {
     font-size: 0.8rem;
@@ -257,6 +264,14 @@ button:hover { background: #444; }
 
 .status.success { color: #6a9a4a; }
 .status.error { color: #9a4a4a; }
+
+#password-reset-banner {
+    margin-bottom: 16px;
+    padding: 10px 12px;
+    border: 1px solid #6a2f2f;
+    border-radius: 4px;
+    background: rgba(154, 74, 74, 0.15);
+}
 
 .error { color: #9a4a4a; font-size: 0.85rem; margin-top: 8px; }
 

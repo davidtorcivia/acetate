@@ -13,6 +13,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -66,6 +67,9 @@ func (s *Server) routes() http.Handler {
 
 			r.Delete("/api/auth", s.handleAdminLogout)
 			r.Get("/api/analytics", s.handleAdminAnalytics)
+			r.Get("/api/admin-users", s.handleAdminListUsers)
+			r.With(bodyLimiter(4096)).Post("/api/admin-users", s.handleAdminCreateUser)
+			r.With(bodyLimiter(4096)).Put("/api/admin-users/{id}", s.handleAdminUpdateUser)
 			r.Get("/api/tracks", s.handleAdminGetTracks)
 			r.With(bodyLimiter(102400)).Put("/api/tracks", s.handleAdminUpdateTracks)
 			r.With(bodyLimiter(1024)).Put("/api/password", s.handleAdminUpdatePassword)
@@ -285,6 +289,20 @@ func (s *Server) handleAdminAuth(w http.ResponseWriter, r *http.Request) {
 	}
 	username := strings.TrimSpace(req.Username)
 
+	loginGuardKey := strings.ToLower(strings.TrimSpace(username)) + "|" + strings.TrimSpace(clientIP)
+	if allowed, retryAfter := s.adminLoginGuard.allow(loginGuardKey, time.Now().UTC()); !allowed {
+		retrySeconds := int(retryAfter.Seconds())
+		if retryAfter%time.Second != 0 {
+			retrySeconds++
+		}
+		if retrySeconds < 1 {
+			retrySeconds = 1
+		}
+		w.Header().Set("Retry-After", strconv.Itoa(retrySeconds))
+		s.recordAdminAuthAttempt(r, username, "rejected", "lockout")
+		jsonError(w, "try again later", http.StatusTooManyRequests)
+		return
+	}
 	// Rate-limit by client + attempted username to reduce brute-force effectiveness.
 	rateKey := "admin:" + clientIP + ":" + strings.ToLower(username)
 	if !s.rateLimiter.Allow(rateKey) {
@@ -296,6 +314,7 @@ func (s *Server) handleAdminAuth(w http.ResponseWriter, r *http.Request) {
 	user, err := s.authenticateAdminCredentials(username, req.Password)
 	if err != nil {
 		if errors.Is(err, errAdminInvalidCreds) {
+			s.adminLoginGuard.markFailure(loginGuardKey, time.Now().UTC())
 			s.recordAdminAuthAttempt(r, username, "rejected", "invalid_credentials")
 			jsonError(w, "unauthorized", http.StatusUnauthorized)
 			return
@@ -305,6 +324,7 @@ func (s *Server) handleAdminAuth(w http.ResponseWriter, r *http.Request) {
 		jsonError(w, "internal error", http.StatusInternalServerError)
 		return
 	}
+	s.adminLoginGuard.markSuccess(loginGuardKey)
 
 	if oldCookie, err := r.Cookie("acetate_admin"); err == nil && oldCookie.Value != "" {
 		_ = s.sessions.DeleteAdminSession(oldCookie.Value)
@@ -329,9 +349,10 @@ func (s *Server) handleAdminAuth(w http.ResponseWriter, r *http.Request) {
 	})
 
 	s.recordAdminAuthAttempt(r, user.Username, "success", "ok")
-	jsonOK(w, map[string]string{
-		"status":   "ok",
-		"username": user.Username,
+	jsonOK(w, map[string]interface{}{
+		"status":                  "ok",
+		"username":                user.Username,
+		"password_reset_required": user.RequirePasswordReset,
 	})
 }
 
@@ -585,9 +606,11 @@ func (s *Server) handleAdminUploadCover(w http.ResponseWriter, r *http.Request) 
 func (s *Server) handleAdminGetConfig(w http.ResponseWriter, r *http.Request) {
 	cfg := s.config.Get()
 	adminUsername := ""
+	passwordResetRequired := false
 	if adminUserID, ok := adminUserIDFromContext(r); ok {
-		if username, err := s.getAdminUsernameByID(adminUserID); err == nil {
-			adminUsername = username
+		if identity, err := s.getAdminIdentityByID(adminUserID); err == nil {
+			adminUsername = identity.Username
+			passwordResetRequired = identity.RequirePasswordReset
 		}
 	}
 	// Truncate password hash for display
@@ -601,12 +624,13 @@ func (s *Server) handleAdminGetConfig(w http.ResponseWriter, r *http.Request) {
 	}
 
 	jsonOK(w, map[string]interface{}{
-		"title":         cfg.Title,
-		"artist":        cfg.Artist,
-		"admin_user":    adminUsername,
-		"password_set":  cfg.Password != "",
-		"password_hash": passDisplay,
-		"track_count":   len(cfg.Tracks),
+		"title":                   cfg.Title,
+		"artist":                  cfg.Artist,
+		"admin_user":              adminUsername,
+		"password_reset_required": passwordResetRequired,
+		"password_set":            cfg.Password != "",
+		"password_hash":           passDisplay,
+		"track_count":             len(cfg.Tracks),
 	})
 }
 

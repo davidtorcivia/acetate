@@ -27,6 +27,7 @@ CREATE TABLE IF NOT EXISTS admin_users (
     username TEXT NOT NULL UNIQUE COLLATE NOCASE,
     password_hash TEXT NOT NULL,
     is_active INTEGER NOT NULL DEFAULT 1,
+    require_password_reset INTEGER NOT NULL DEFAULT 0,
     created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
     updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
     last_login_at DATETIME
@@ -67,6 +68,7 @@ CREATE INDEX IF NOT EXISTS idx_events_created_at ON events(created_at);
 CREATE INDEX IF NOT EXISTS idx_sessions_last_seen ON sessions(last_seen_at);
 CREATE INDEX IF NOT EXISTS idx_admin_sessions_user ON admin_sessions(user_id);
 CREATE INDEX IF NOT EXISTS idx_admin_users_username ON admin_users(username);
+CREATE INDEX IF NOT EXISTS idx_admin_users_active ON admin_users(is_active);
 CREATE INDEX IF NOT EXISTS idx_rollups_day ON analytics_rollups_daily(day);
 CREATE INDEX IF NOT EXISTS idx_rollups_track ON analytics_rollups_daily(track_stem);
 CREATE INDEX IF NOT EXISTS idx_admin_auth_audit_occurred ON admin_auth_audit(occurred_at);
@@ -91,6 +93,9 @@ func Migrate(db *sql.DB) error {
 		return err
 	}
 	if err := ensureColumnExists(db, "admin_auth_audit", "attempted_username", "TEXT"); err != nil {
+		return err
+	}
+	if err := ensureColumnExists(db, "admin_users", "require_password_reset", "INTEGER NOT NULL DEFAULT 0"); err != nil {
 		return err
 	}
 

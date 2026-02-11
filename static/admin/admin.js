@@ -2,7 +2,7 @@
 (function () {
     'use strict';
 
-    var loginPanel, setupPanel, dashboard, loginForm, setupForm, usernameInput, passwordInput, loginError;
+    var loginPanel, setupPanel, dashboard, loginForm, setupForm, usernameInput, passwordInput, loginError, passwordResetBanner;
 
     function init() {
         loginPanel = document.getElementById('admin-login');
@@ -13,6 +13,7 @@
         usernameInput = document.getElementById('admin-username');
         passwordInput = document.getElementById('admin-password');
         loginError = document.getElementById('login-error');
+        passwordResetBanner = document.getElementById('password-reset-banner');
 
         loginForm.addEventListener('submit', handleLogin);
         setupForm.addEventListener('submit', handleSetup);
@@ -112,11 +113,16 @@
         })
             .then(function (r) {
                 if (r.ok) {
-                    showDashboard();
+                    return r.json();
                 } else {
                     loginError.textContent = 'Invalid credentials';
                     loginError.classList.remove('hidden');
+                    return null;
                 }
+            })
+            .then(function (payload) {
+                if (!payload) return;
+                showDashboard(!!payload.password_reset_required);
             })
             .catch(function () {
                 loginError.textContent = 'Connection error';
@@ -137,6 +143,7 @@
         dashboard.classList.add('hidden');
         usernameInput.value = '';
         passwordInput.value = '';
+        setPasswordResetMode(false);
         usernameInput.focus();
     }
 
@@ -147,19 +154,54 @@
         document.getElementById('setup-username').focus();
     }
 
-    function showDashboard() {
+    function showDashboard(passwordResetRequired) {
         setupPanel.classList.add('hidden');
         loginPanel.classList.add('hidden');
         dashboard.classList.remove('hidden');
-        loadConfig();
-        loadTracks();
-        loadAnalytics();
+        if (passwordResetRequired) {
+            setPasswordResetMode(true);
+        }
+        loadConfig().then(function (needsReset) {
+            if (!needsReset) {
+                loadTracks();
+                loadAnalytics();
+            } else {
+                clearAnalyticsTables();
+                document.getElementById('track-list').innerHTML = '';
+            }
+        });
+    }
+
+    function setPasswordResetMode(enabled) {
+        var gatedSections = ['section-password', 'section-cover', 'section-tracks', 'section-analytics'];
+        gatedSections.forEach(function (id) {
+            var el = document.getElementById(id);
+            if (!el) return;
+            el.classList.toggle('hidden', !!enabled);
+        });
+        if (passwordResetBanner) {
+            passwordResetBanner.classList.toggle('hidden', !enabled);
+        }
+    }
+
+    function clearAnalyticsTables() {
+        var trackStats = document.getElementById('track-stats-body');
+        var sessions = document.getElementById('sessions-body');
+        if (trackStats) {
+            trackStats.innerHTML = '<tr><td colspan="6">Password reset required</td></tr>';
+        }
+        if (sessions) {
+            sessions.innerHTML = '<tr><td colspan="4">Password reset required</td></tr>';
+        }
     }
 
     // --- Config ---
     function loadConfig() {
-        fetch('/admin/api/config', { credentials: 'same-origin' })
-            .then(function (r) { return r.json(); })
+        return fetch('/admin/api/config', { credentials: 'same-origin' })
+            .then(function (r) {
+                if (!r.ok) throw new Error('unauthorized');
+                return r.json();
+            })
             .then(function (data) {
                 document.getElementById('cfg-title').textContent = data.title || '(not set)';
                 document.getElementById('cfg-artist').textContent = data.artist || '(not set)';
@@ -168,6 +210,13 @@
                     ? data.password_hash
                     : '(not set)';
                 document.getElementById('cfg-tracks').textContent = data.track_count + ' tracks';
+                var needsReset = !!data.password_reset_required;
+                setPasswordResetMode(needsReset);
+                return needsReset;
+            })
+            .catch(function () {
+                showLogin();
+                return true;
             });
     }
 
@@ -430,14 +479,16 @@
 
         var maxCount = 0;
         bins.forEach(function (b) { if (b.count > maxCount) maxCount = b.count; });
-        if (maxCount === 0) return '<span class="heatmap">' + bins.map(function () { return '<span class="heatmap-bin" style="background:#2a2a2a"></span>'; }).join('') + '</span>';
+        if (maxCount === 0) {
+            return '<span class="heatmap">' + bins.map(function () {
+                return '<span class="heatmap-bin heatmap-level-0"></span>';
+            }).join('') + '</span>';
+        }
 
         return '<span class="heatmap">' + bins.map(function (b) {
             var intensity = b.count / maxCount;
-            var r = Math.round(60 + intensity * 100);
-            var g = Math.round(40);
-            var blue = Math.round(40);
-            return '<span class="heatmap-bin" style="background:rgb(' + r + ',' + g + ',' + blue + ')" title="' + (b.bin_start * 100) + '-' + (b.bin_end * 100) + '%: ' + b.count + '"></span>';
+            var level = Math.max(1, Math.min(5, Math.ceil(intensity * 5)));
+            return '<span class="heatmap-bin heatmap-level-' + level + '" title="' + (b.bin_start * 100) + '-' + (b.bin_end * 100) + '%: ' + b.count + '"></span>';
         }).join('') + '</span>';
     }
 

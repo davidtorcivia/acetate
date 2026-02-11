@@ -25,6 +25,7 @@ type Server struct {
 	config                 *config.Manager
 	sessions               *auth.SessionStore
 	rateLimiter            *auth.RateLimiter
+	adminLoginGuard        *adminLoginGuard
 	cfIPs                  *auth.CloudflareIPs
 	collector              *analytics.Collector
 	albumPath              string
@@ -60,6 +61,7 @@ func New(cfg Config) *Server {
 		config:                 cfg.ConfigMgr,
 		sessions:               sessions,
 		rateLimiter:            rateLimiter,
+		adminLoginGuard:        newAdminLoginGuard(),
 		cfIPs:                  cfIPs,
 		collector:              collector,
 		albumPath:              cfg.AlbumPath,

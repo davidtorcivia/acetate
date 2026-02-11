@@ -33,9 +33,10 @@ var (
 var ErrAdminBootstrapMissing = errAdminBootstrapMissing
 
 type adminUserRecord struct {
-	ID           int64
-	Username     string
-	PasswordHash string
+	ID                   int64
+	Username             string
+	PasswordHash         string
+	RequirePasswordReset bool
 }
 
 // EnsureAdminBootstrap creates the first admin account when the database has no admin users.
@@ -152,10 +153,11 @@ func (s *Server) authenticateAdminCredentials(username, password string) (adminU
 		return user, errAdminInvalidCreds
 	}
 
+	var requireReset int
 	err = s.db.QueryRow(
-		"SELECT id, username, password_hash FROM admin_users WHERE username = ? AND is_active = 1",
+		"SELECT id, username, password_hash, require_password_reset FROM admin_users WHERE username = ? AND is_active = 1",
 		normalizedUsername,
-	).Scan(&user.ID, &user.Username, &user.PasswordHash)
+	).Scan(&user.ID, &user.Username, &user.PasswordHash, &requireReset)
 	if err == sql.ErrNoRows {
 		_ = bcrypt.CompareHashAndPassword([]byte(dummyAdminPasswordHash), []byte(password))
 		return user, errAdminInvalidCreds
@@ -167,6 +169,7 @@ func (s *Server) authenticateAdminCredentials(username, password string) (adminU
 	if bcrypt.CompareHashAndPassword([]byte(user.PasswordHash), []byte(password)) != nil {
 		return adminUserRecord{}, errAdminInvalidCreds
 	}
+	user.RequirePasswordReset = requireReset == 1
 
 	_, _ = s.db.Exec(
 		"UPDATE admin_users SET last_login_at = ?, updated_at = ? WHERE id = ?",
@@ -203,7 +206,7 @@ func (s *Server) updateAdminPassword(userID int64, currentPassword, newPassword 
 	}
 
 	_, err = s.db.Exec(
-		"UPDATE admin_users SET password_hash = ?, updated_at = ? WHERE id = ?",
+		"UPDATE admin_users SET password_hash = ?, require_password_reset = 0, updated_at = ? WHERE id = ?",
 		string(newHash), time.Now().UTC(), userID,
 	)
 	if err != nil {
@@ -227,6 +230,24 @@ func (s *Server) getAdminUsernameByID(userID int64) (string, error) {
 		return "", err
 	}
 	return username, nil
+}
+
+func (s *Server) getAdminIdentityByID(userID int64) (adminUserRecord, error) {
+	user := adminUserRecord{}
+	if userID <= 0 {
+		return user, errors.New("invalid admin user id")
+	}
+
+	var requireReset int
+	err := s.db.QueryRow(
+		"SELECT id, username, require_password_reset FROM admin_users WHERE id = ? AND is_active = 1",
+		userID,
+	).Scan(&user.ID, &user.Username, &requireReset)
+	if err != nil {
+		return user, err
+	}
+	user.RequirePasswordReset = requireReset == 1
+	return user, nil
 }
 
 func (s *Server) needsAdminSetup() (bool, error) {

@@ -85,7 +85,8 @@ func (s *Server) handleAdminSetupBootstrap(w http.ResponseWriter, r *http.Reques
 
 	s.recordAdminAuthAttempt(r, user.Username, "success", "bootstrap_setup")
 	jsonCreated(w, map[string]interface{}{
-		"status":   "ok",
-		"username": user.Username,
+		"status":                  "ok",
+		"username":                user.Username,
+		"password_reset_required": false,
 	})
 }

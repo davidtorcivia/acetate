@@ -133,7 +133,7 @@ func TestAdminSessionFingerprintBinding(t *testing.T) {
 		t.Fatalf("CreateAdminSessionWithContext: %v", err)
 	}
 
-	valid, _, err := store.ValidateAdminSessionWithContext(id, "127.0.0.1", "test-agent")
+	valid, _, _, err := store.ValidateAdminSessionWithContext(id, "127.0.0.1", "test-agent")
 	if err != nil {
 		t.Fatalf("ValidateAdminSessionWithContext: %v", err)
 	}
@@ -141,7 +141,7 @@ func TestAdminSessionFingerprintBinding(t *testing.T) {
 		t.Fatal("session should validate for same fingerprint")
 	}
 
-	valid, _, err = store.ValidateAdminSessionWithContext(id, "127.0.0.2", "test-agent")
+	valid, _, _, err = store.ValidateAdminSessionWithContext(id, "127.0.0.2", "test-agent")
 	if err != nil {
 		t.Fatalf("ValidateAdminSessionWithContext mismatch: %v", err)
 	}

@@ -58,7 +58,7 @@ func (s *Server) requireAdmin(next http.Handler) http.Handler {
 
 		clientIP := s.cfIPs.GetClientIP(r)
 		userAgent := strings.TrimSpace(r.UserAgent())
-		valid, userID, err := s.sessions.ValidateAdminSessionWithContext(cookie.Value, clientIP, userAgent)
+		valid, userID, needsPasswordReset, err := s.sessions.ValidateAdminSessionWithContext(cookie.Value, clientIP, userAgent)
 		if err != nil {
 			log.Printf("admin session validate error: %v", err)
 			jsonError(w, "internal error", http.StatusInternalServerError)
@@ -77,10 +77,20 @@ func (s *Server) requireAdmin(next http.Handler) http.Handler {
 			jsonError(w, "unauthorized", http.StatusUnauthorized)
 			return
 		}
+		if needsPasswordReset && !allowDuringForcedPasswordReset(r.Method, r.URL.Path) {
+			jsonError(w, "password reset required", http.StatusForbidden)
+			return
+		}
 
 		ctx := context.WithValue(r.Context(), adminUserIDKey, userID)
 		next.ServeHTTP(w, r.WithContext(ctx))
 	})
+}
+
+func allowDuringForcedPasswordReset(method, path string) bool {
+	return (method == http.MethodPut && path == "/admin/api/admin-password") ||
+		(method == http.MethodDelete && path == "/admin/api/auth") ||
+		(method == http.MethodGet && path == "/admin/api/config")
 }
 
 // csrfCheck validates the Origin header on state-mutating requests.
@@ -131,7 +141,7 @@ func requestScheme(r *http.Request) string {
 
 // securityHeaders sets secure defaults for every response.
 func securityHeaders(next http.Handler) http.Handler {
-	const csp = "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; media-src 'self'; connect-src 'self'; font-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'"
+	const csp = "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data: blob:; media-src 'self'; connect-src 'self'; font-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'"
 
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		h := w.Header()
