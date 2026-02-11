@@ -2,7 +2,7 @@
 data/
 
 # Album directory (user content)
-album/
+/album/
 
 # Go binaries
 *.exe

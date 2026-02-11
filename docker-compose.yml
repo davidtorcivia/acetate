@@ -2,13 +2,11 @@ services:
   acetate:
     build: .
     ports:
-      - "8080:8080"
+      - "8087:8080"
     volumes:
       - ./album:/album:ro
       - ./data:/data
     environment:
-      - ADMIN_USERNAME=${ADMIN_USERNAME}
-      - ADMIN_PASSWORD_HASH=${ADMIN_PASSWORD_HASH}
       - LISTEN_ADDR=:8080
       - ALBUM_PATH=/album
       - DATA_PATH=/data

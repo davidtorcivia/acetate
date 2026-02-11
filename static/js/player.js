@@ -692,14 +692,14 @@
     }
 
     function setPlayIcon() {
-        btnPlay.textContent = '▶';
+        btnPlay.innerHTML = '<svg width="18" height="20" viewBox="0 0 18 20" fill="currentColor"><polygon points="2,0 18,10 2,20"/></svg>';
         btnPlay.setAttribute('aria-label', 'Play');
         btnPlay.setAttribute('aria-pressed', 'false');
         btnPlay.classList.remove('is-paused');
     }
 
     function setPauseIcon() {
-        btnPlay.textContent = '⏸';
+        btnPlay.innerHTML = '<svg width="16" height="20" viewBox="0 0 16 20" fill="currentColor"><rect x="1" y="0" width="4.5" height="20"/><rect x="10.5" y="0" width="4.5" height="20"/></svg>';
         btnPlay.setAttribute('aria-label', 'Pause');
         btnPlay.setAttribute('aria-pressed', 'true');
         btnPlay.classList.add('is-paused');

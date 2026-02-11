@@ -365,9 +365,9 @@ body::after {
     padding: 0;
 }
 
-.control-btn-main.is-paused {
-    font-size: 1.3rem;
-    letter-spacing: 0;
+.control-btn svg,
+.control-btn-main svg {
+    display: block;
 }
 
 /* Progress bar */
