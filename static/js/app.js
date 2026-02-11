@@ -9,8 +9,10 @@
         offlineMode: false,
         offlineAlbumKey: 'acetate-offline-album-v1',
         playbackStateKey: 'acetate-playback-v1',
+        pendingDeepLinkSearch: '',
 
         init: function () {
+            this.pendingDeepLinkSearch = this.extractDeepLinkSearch(window.location.search);
             this.checkSession();
 
             // Register service worker
@@ -49,7 +51,11 @@
 
         onAuthenticated: function (prefetchedData, isOffline) {
             // Push history state for back button protection
-            history.pushState({ screen: 'player' }, '', window.location.pathname + window.location.search + window.location.hash);
+            var nextSearch = window.location.search;
+            if (this.pendingDeepLinkSearch && nextSearch !== this.pendingDeepLinkSearch) {
+                nextSearch = this.pendingDeepLinkSearch;
+            }
+            history.pushState({ screen: 'player' }, '', window.location.pathname + nextSearch + window.location.hash);
             this.notifyServiceWorker('AUTHENTICATED');
             this.offlineMode = !!isOffline;
             document.body.classList.toggle('offline-mode', this.offlineMode);
@@ -154,8 +160,11 @@
             var tracks = (albumData && albumData.tracks) ? albumData.tracks : [];
             if (!tracks.length) return { index: 0, time: 0 };
 
-            var deepLink = this.parseDeepLinkTarget(tracks);
-            if (deepLink) return deepLink;
+            if (this.pendingDeepLinkSearch) {
+                var deepLink = this.parseDeepLinkTarget(tracks, this.pendingDeepLinkSearch);
+                this.pendingDeepLinkSearch = '';
+                if (deepLink) return deepLink;
+            }
 
             var playbackState = this.readPlaybackState();
             if (playbackState) {
@@ -175,8 +184,8 @@
             return { index: 0, time: 0 };
         },
 
-        parseDeepLinkTarget: function (tracks) {
-            var params = new URLSearchParams(window.location.search);
+        parseDeepLinkTarget: function (tracks, search) {
+            var params = new URLSearchParams(search || window.location.search || '');
             var hasTrack = params.has('track');
             var hasTime = params.has('t');
             if (!hasTrack && !hasTime) return null;
@@ -205,6 +214,9 @@
             }
 
             var lowered = value.toLowerCase();
+            if (lowered.slice(-4) === '.mp3') {
+                lowered = lowered.slice(0, -4);
+            }
             for (var i = 0; i < tracks.length; i++) {
                 if (String(tracks[i].stem || '').toLowerCase() === lowered) return i;
                 if (String(tracks[i].title || '').toLowerCase() === lowered) return i;
@@ -251,7 +263,7 @@
         makeAlbumFingerprint: function (albumData) {
             if (!albumData || !albumData.tracks) return '';
             var stems = albumData.tracks.map(function (t) { return t.stem; }).join('|');
-            return [albumData.title || '', albumData.artist || '', stems].join('::');
+            return stems;
         },
 
         readPlaybackState: function () {
@@ -305,6 +317,14 @@
             return encodeURIComponent(value).replace(/[!'()*]/g, function (ch) {
                 return '%' + ch.charCodeAt(0).toString(16).toUpperCase();
             });
+        },
+
+        extractDeepLinkSearch: function (search) {
+            var params = new URLSearchParams(search || '');
+            if (!params.has('track') && !params.has('t')) {
+                return '';
+            }
+            return search || '';
         },
 
         makeCoverFallback: function () {

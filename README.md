@@ -12,8 +12,36 @@ Acetate serves one album from local files, protects playback behind a shared pas
 - Admin dashboard for track order, passphrase update, cover upload, and analytics.
 - MP3 range streaming for seek support and iOS playback compatibility.
 - Lyrics priority: `.lrc` -> `.txt` -> `.md`.
-- Service worker for static caching and bounded audio cache behavior.
+- Listener UX: persistent resume state (track/time/volume), deep links, keyboard shortcuts, clickable timed lyrics.
+- Service worker for static + API + audio caching (offline playback for already-opened albums).
 - Docker-ready deployment.
+
+## Listener UX
+
+- Resume from last playback position per device.
+- Deep-link support: `?track=<stem|title|index>&t=<seconds|mm:ss|hh:mm:ss>`.
+- Gapless double-deck playback with next-track preloading and prefetch.
+- Timed lyrics:
+  - line highlighting with lead offset
+  - click/keyboard seek from lyric lines
+  - section-aware formatting from optional `.txt`/`.md` structure hints
+- Keyboard shortcuts:
+  - `Space`: play/pause
+  - `Left/Right`: seek -/+5 seconds
+  - `Up/Down`: volume +/-
+  - `L`: toggle lyrics visibility
+- Mobile ergonomics:
+  - sticky control area
+  - larger touch targets
+  - safe-area-aware padding
+  - improved scroll containment
+
+## PWA / Offline
+
+- Static assets are cached for app shell startup.
+- Authenticated API responses for `/api/tracks`, `/api/cover`, and `/api/lyrics/{stem}` are cached.
+- Audio streams are cached (bounded LRU-style size) and can be served offline, including ranged playback from cache.
+- App keeps a local album snapshot for offline startup after a successful authenticated session.
 
 ## Architecture
 
@@ -225,7 +253,12 @@ Admin endpoints:
 
 - `POST /admin/api/auth`
 - `DELETE /admin/api/auth`
+- `GET /admin/api/setup/status`
+- `POST /admin/api/setup`
 - `GET /admin/api/config`
+- `GET /admin/api/admin-users`
+- `POST /admin/api/admin-users`
+- `PUT /admin/api/admin-users/{id}`
 - `GET /admin/api/tracks`
 - `PUT /admin/api/tracks`
 - `PUT /admin/api/password`
@@ -244,16 +277,20 @@ Admin endpoints:
 
 - Listener and admin auth use separate HttpOnly cookies.
 - Admin auth uses DB-backed `admin_users` with bcrypt password hashes.
+- First-run admin setup flow exists when no admin users are present.
 - Passphrase is verified with bcrypt hash from config.
 - Session IDs are cryptographically random and server-stored.
 - Session expiry:
   - listener: 7 days, sliding
   - admin: 1 hour, fixed
+- Admin sessions are bound to coarse client fingerprint (IP hash + user-agent hash).
+- Repeated failed admin logins trigger lockout/backoff throttling.
+- Forced admin password reset mode can restrict admin actions until password rotation is completed.
 - Admin mutating endpoints enforce same-origin `Origin` check.
 - Stem validation blocks traversal and only allows configured tracks.
 - Cover upload validates image type/dimensions before storage.
 - Cloudflare client-IP trust only applies when request source is in Cloudflare IP ranges.
-- Global security headers include CSP, `X-Frame-Options`, and `nosniff`.
+- Global security headers include strict CSP (`style-src 'self'`), `X-Frame-Options`, and `nosniff`.
 
 ## Analytics
 
@@ -297,6 +334,11 @@ node --check static/sw.js
 
 ## Operations
 
+### Upgrades
+
+- Database schema migrations run automatically on startup.
+- Existing installations are upgraded in place (including legacy `admin_sessions` schemas).
+
 ### Back up state
 
 Back up `data/`:
@@ -318,8 +360,11 @@ Back up `data/`:
 - Admin login fails on first boot: ensure `ADMIN_USERNAME` + `ADMIN_PASSWORD_HASH` (or `ADMIN_PASSWORD`) are set.
 - If no admin exists yet, open `/admin` and complete the first-time setup form.
 - No tracks shown: confirm `.mp3` files exist at album root and track stems match config.
+- Deep link not applying: verify URL includes `track`/`t` parameters and stems/titles match current album tracks.
+- Resume point not restoring: ensure browser storage is enabled (private modes may block or purge local storage).
 - Cover upload rejected: use valid JPEG/PNG with reasonable dimensions.
 - Rate limited on auth: wait for the limiter window to reset.
+- After frontend updates, hard-refresh once so the latest service worker and JS are active.
 
 ## File Tree
 

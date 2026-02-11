@@ -635,7 +635,7 @@
         for (var i = 0; i < albumData.tracks.length; i++) {
             stems.push(albumData.tracks[i].stem);
         }
-        return [albumData.title || '', albumData.artist || '', stems.join('|')].join('::');
+        return stems.join('|');
     }
 
     function syncPlaybackURL(force, timeSeconds) {
