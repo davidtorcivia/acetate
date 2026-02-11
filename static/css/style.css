@@ -730,6 +730,12 @@ body::after {
             "controls"
             "tracklist";
     }
+
+    #player.lyrics-hidden .tracklist {
+        max-height: none;
+        height: 100%;
+        overflow-y: auto;
+    }
 }
 
 /* === Utilities === */
