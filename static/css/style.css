@@ -581,6 +581,20 @@ body::after {
     .tracklist li {
         padding: 12px 12px;
     }
+
+    .tracklist {
+        -webkit-overflow-scrolling: touch;
+        overscroll-behavior: contain;
+    }
+
+    .tracklist.expanded {
+        /* Keep the list visible above sticky controls on small phones. */
+        max-height: clamp(170px, 42vh, 320px);
+    }
+
+    .tracklist ol {
+        padding-bottom: calc(128px + env(safe-area-inset-bottom));
+    }
 }
 
 @media (max-width: 480px) {
