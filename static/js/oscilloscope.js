@@ -5,6 +5,7 @@
     var canvas, ctx;
     var audioCtx = null;
     var analyser = null;
+    var gainNode = null;
     var sourceA = null, sourceB = null;
     var dataArray = null;
     var currentSource = null;
@@ -17,7 +18,8 @@
         init: initAudio,
         draw: draw,
         setActiveDeck: setActiveDeck,
-        resumeContext: resumeContext
+        resumeContext: resumeContext,
+        setVolume: setVolume
     };
 
     function initCanvas() {
@@ -52,13 +54,18 @@
 
             dataArray = new Uint8Array(analyser.frequencyBinCount);
 
+            // Shared gain node for volume control (Safari ignores
+            // element.volume once routed through Web Audio).
+            gainNode = audioCtx.createGain();
+            gainNode.connect(audioCtx.destination);
+
             // Create sources (once per element — cannot be recreated)
             sourceA = audioCtx.createMediaElementSource(deckA);
             sourceB = audioCtx.createMediaElementSource(deckB);
 
-            // Connect both to destination (speakers)
-            sourceA.connect(audioCtx.destination);
-            sourceB.connect(audioCtx.destination);
+            // Connect both through gain node to destination (speakers)
+            sourceA.connect(gainNode);
+            sourceB.connect(gainNode);
 
             // Connect active source to analyser
             sourceA.connect(analyser);
@@ -85,6 +92,12 @@
     function resumeContext() {
         if (audioCtx && audioCtx.state === 'suspended') {
             audioCtx.resume();
+        }
+    }
+
+    function setVolume(value) {
+        if (gainNode) {
+            gainNode.gain.value = value;
         }
     }
 

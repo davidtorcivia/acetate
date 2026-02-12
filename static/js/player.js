@@ -353,6 +353,12 @@
 
     function applyVolume() {
         var effective = isMuted ? 0 : currentVolume;
+        // Prefer Web Audio gain node (required for Safari once audio is
+        // routed through createMediaElementSource). Falls back to
+        // element.volume for when Web Audio hasn't been initialised yet.
+        if (typeof AcetateOscilloscope !== 'undefined' && AcetateOscilloscope.setVolume) {
+            AcetateOscilloscope.setVolume(effective);
+        }
         if (deckA) deckA.volume = effective;
         if (deckB) deckB.volume = effective;
     }
