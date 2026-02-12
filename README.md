@@ -1,5 +1,7 @@
 # Acetate
 
+![](https://images.disinfo.zone/uploads/PfZMnuFULcoAW8QyRLUJ3q7LbWLXJ4WGL5XUZc9H.jpg)
+
 A self-hosted, password-gated album listening room.
 
 Acetate serves one album from local files, protects playback behind a shared passphrase, includes synchronized lyrics and an oscilloscope visualizer, and records listener analytics for the admin dashboard.
