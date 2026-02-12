@@ -68,15 +68,20 @@
     function setActive(index) {
         if (!items) return;
         var lis = items.querySelectorAll('li');
+        var activeLi = null;
         lis.forEach(function (li) {
             var isActive = parseInt(li.dataset.index, 10) === index;
             li.classList.toggle('active', isActive);
             if (isActive) {
                 li.setAttribute('aria-current', 'true');
+                activeLi = li;
             } else {
                 li.removeAttribute('aria-current');
             }
         });
+        if (activeLi && container) {
+            activeLi.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+        }
     }
 
     document.addEventListener('DOMContentLoaded', init);

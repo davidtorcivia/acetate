@@ -688,7 +688,6 @@ body::after {
         row-gap: 6px;
         align-items: start;
         justify-content: center;
-        overflow-y: auto;
     }
 
     .cover {
@@ -722,9 +721,28 @@ body::after {
 
     .tracklist {
         grid-area: tracklist;
+        align-self: stretch;
         min-height: 0;
         max-height: none;
+        overflow-y: auto;
         transition: none;
+        -webkit-mask-image: linear-gradient(to bottom, #000 calc(100% - 32px), transparent);
+        mask-image: linear-gradient(to bottom, #000 calc(100% - 32px), transparent);
+        scrollbar-width: thin;
+        scrollbar-color: var(--border) transparent;
+    }
+
+    .tracklist::-webkit-scrollbar {
+        width: 4px;
+    }
+
+    .tracklist::-webkit-scrollbar-track {
+        background: transparent;
+    }
+
+    .tracklist::-webkit-scrollbar-thumb {
+        background: var(--border);
+        border-radius: 2px;
     }
 
     .tracklist.collapsed,
