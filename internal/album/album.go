@@ -1,7 +1,6 @@
 package album
 
 import (
-	"bytes"
 	"crypto/sha256"
 	"fmt"
 	"net/http"
@@ -11,9 +10,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/yuin/goldmark"
-
-	"acetate/internal/config"
+	"acetate/internal/albums"
 )
 
 var stemRegexp = regexp.MustCompile(`^[a-zA-Z0-9 _'()\-]+$`)
@@ -32,8 +29,9 @@ func ValidateStem(stem string) bool {
 	return stemRegexp.MatchString(stem)
 }
 
-func StemInConfig(stem string, cfg config.Config) bool {
-	for _, t := range cfg.Tracks {
+// StemInTracks checks if the stem exists in the given track list.
+func StemInTracks(stem string, tracks []albums.Track) bool {
+	for _, t := range tracks {
 		if t.Stem == stem {
 			return true
 		}
@@ -41,18 +39,19 @@ func StemInConfig(stem string, cfg config.Config) bool {
 	return false
 }
 
-func GetTrackList(cfg config.Config, albumPath string) []TrackInfo {
-	tracks := make([]TrackInfo, 0, len(cfg.Tracks))
-	for _, t := range cfg.Tracks {
+// GetTrackList builds the track list response with lyric format info.
+func GetTrackList(tracks []albums.Track, albumPath string) []TrackInfo {
+	out := make([]TrackInfo, 0, len(tracks))
+	for _, t := range tracks {
 		info := TrackInfo{
 			Stem:         t.Stem,
 			Title:        t.Title,
 			DisplayIndex: t.DisplayIndex,
 			LyricFormat:  detectLyricFormat(albumPath, t.Stem),
 		}
-		tracks = append(tracks, info)
+		out = append(out, info)
 	}
-	return tracks
+	return out
 }
 
 func detectLyricFormat(albumPath, stem string) string {
@@ -140,58 +139,4 @@ func StreamTrack(w http.ResponseWriter, r *http.Request, albumPath, stem string)
 	w.Header().Set("Content-Type", "audio/mpeg")
 	w.Header().Set("Accept-Ranges", "bytes")
 	http.ServeContent(w, r, stem+".mp3", time.Time{}, f)
-}
-
-func ServeLyrics(w http.ResponseWriter, albumPath, stem string) interface{} {
-	// Try .lrc first (synced lyrics).
-	if data, err := os.ReadFile(filepath.Join(albumPath, stem+".lrc")); err == nil {
-		resp := map[string]interface{}{
-			"format":  "lrc",
-			"content": string(data),
-		}
-		// Check for structure file: explicit .structure.* first, then fall back
-		// to the plain .txt which typically carries verse/chorus annotations.
-		if sData, err := os.ReadFile(filepath.Join(albumPath, stem+".structure.lrc")); err == nil {
-			resp["structure_content"] = string(sData)
-		} else if sData, err := os.ReadFile(filepath.Join(albumPath, stem+".structure.txt")); err == nil {
-			resp["structure_content"] = string(sData)
-		} else if sData, err := os.ReadFile(filepath.Join(albumPath, stem+".txt")); err == nil {
-			resp["structure_content"] = string(sData)
-		}
-		return resp
-	}
-
-	// Try .srt (SubRip subtitle format, treated as lrc).
-	if data, err := os.ReadFile(filepath.Join(albumPath, stem+".srt")); err == nil {
-		return map[string]interface{}{
-			"format":  "lrc",
-			"content": string(data),
-		}
-	}
-
-	// Try .md (markdown, rendered to HTML).
-	if data, err := os.ReadFile(filepath.Join(albumPath, stem+".md")); err == nil {
-		var buf bytes.Buffer
-		if err := goldmark.Convert(data, &buf); err == nil {
-			return map[string]interface{}{
-				"format":  "markdown",
-				"content": buf.String(),
-			}
-		}
-		// Fallback to raw if goldmark fails.
-		return map[string]interface{}{
-			"format":  "text",
-			"content": string(data),
-		}
-	}
-
-	// Try .txt (plain text).
-	if data, err := os.ReadFile(filepath.Join(albumPath, stem+".txt")); err == nil {
-		return map[string]interface{}{
-			"format":  "text",
-			"content": strings.TrimSpace(string(data)),
-		}
-	}
-
-	return nil
 }

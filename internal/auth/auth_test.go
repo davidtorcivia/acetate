@@ -47,12 +47,12 @@ func seedAdminUser(t *testing.T, store *SessionStore) int64 {
 func TestCreateAndValidateSession(t *testing.T) {
 	store := testDB(t)
 
-	id, err := store.CreateSession("127.0.0.1")
+	id, err := store.CreateSession("127.0.0.1", 0)
 	if err != nil {
 		t.Fatalf("CreateSession: %v", err)
 	}
 
-	valid, err := store.ValidateSession(id)
+	valid, _, err := store.ValidateSession(id)
 	if err != nil {
 		t.Fatalf("ValidateSession: %v", err)
 	}
@@ -64,7 +64,7 @@ func TestCreateAndValidateSession(t *testing.T) {
 func TestDeleteSession(t *testing.T) {
 	store := testDB(t)
 
-	id, err := store.CreateSession("127.0.0.1")
+	id, err := store.CreateSession("127.0.0.1", 0)
 	if err != nil {
 		t.Fatalf("CreateSession: %v", err)
 	}
@@ -73,7 +73,7 @@ func TestDeleteSession(t *testing.T) {
 		t.Fatalf("DeleteSession: %v", err)
 	}
 
-	valid, err := store.ValidateSession(id)
+	valid, _, err := store.ValidateSession(id)
 	if err != nil {
 		t.Fatalf("ValidateSession: %v", err)
 	}
@@ -85,7 +85,7 @@ func TestDeleteSession(t *testing.T) {
 func TestInvalidSession(t *testing.T) {
 	store := testDB(t)
 
-	valid, err := store.ValidateSession("nonexistent")
+	valid, _, err := store.ValidateSession("nonexistent")
 	if err != nil {
 		t.Fatalf("ValidateSession: %v", err)
 	}
@@ -171,16 +171,16 @@ func TestVerifyPassphrase(t *testing.T) {
 func TestSessionRotation(t *testing.T) {
 	store := testDB(t)
 
-	id1, _ := store.CreateSession("127.0.0.1")
-	id2, _ := store.CreateSession("127.0.0.1")
+	id1, _ := store.CreateSession("127.0.0.1", 0)
+	id2, _ := store.CreateSession("127.0.0.1", 0)
 
 	if id1 == id2 {
 		t.Error("session IDs should be unique (rotation)")
 	}
 
 	// Both sessions should be valid
-	v1, _ := store.ValidateSession(id1)
-	v2, _ := store.ValidateSession(id2)
+	v1, _, _ := store.ValidateSession(id1)
+	v2, _, _ := store.ValidateSession(id2)
 	if !v1 || !v2 {
 		t.Error("both sessions should be valid")
 	}
@@ -211,7 +211,7 @@ func TestCleanup(t *testing.T) {
 
 	store.cleanup()
 
-	valid, _ := store.ValidateSession("expired-session")
+	valid, _, _ := store.ValidateSession("expired-session")
 	if valid {
 		t.Error("expired session should have been cleaned up")
 	}

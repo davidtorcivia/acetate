@@ -78,13 +78,23 @@
         buffer.push(event);
     }
 
+    function getAnalyticsUrl() {
+        if (typeof Acetate !== 'undefined' && Acetate.currentAlbum && Acetate.albumApiBase) {
+            return Acetate.albumApiBase() + '/analytics';
+        }
+        return null;
+    }
+
     function flush() {
         if (buffer.length === 0) return;
+
+        var url = getAnalyticsUrl();
+        if (!url) return; // No album selected yet — keep events buffered
 
         var events = buffer.slice();
         buffer = [];
 
-        fetch('/api/analytics', {
+        fetch(url, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             credentials: 'same-origin',
@@ -101,11 +111,14 @@
     function flushBeacon() {
         if (buffer.length === 0) return;
 
+        var url = getAnalyticsUrl();
+        if (!url) return;
+
         var events = buffer.slice();
         buffer = [];
 
         var blob = new Blob([JSON.stringify(events)], { type: 'application/json' });
-        navigator.sendBeacon('/api/analytics', blob);
+        navigator.sendBeacon(url, blob);
     }
 
     document.addEventListener('DOMContentLoaded', init);

@@ -416,7 +416,7 @@
             title: track.title,
             artist: Acetate.albumData.artist,
             album: Acetate.albumData.title,
-            artwork: [{ src: '/api/cover', sizes: '512x512', type: 'image/jpeg' }]
+            artwork: [{ src: Acetate.albumApiBase() + '/cover', sizes: '512x512', type: 'image/jpeg' }]
         });
 
         navigator.mediaSession.setActionHandler('play', play);
@@ -674,7 +674,7 @@
     }
 
     function streamURL(stem) {
-        return '/api/stream/' + encodePathSegment(stem);
+        return Acetate.albumApiBase() + '/stream/' + encodePathSegment(stem);
     }
 
     function isDeckSource(deck, relativeURL) {

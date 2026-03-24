@@ -21,9 +21,9 @@ import (
 
 	acetate "acetate"
 	"acetate/internal/album"
+	"acetate/internal/albums"
 	"acetate/internal/analytics"
 	"acetate/internal/auth"
-	"acetate/internal/config"
 )
 
 func (s *Server) routes() http.Handler {
@@ -44,13 +44,18 @@ func (s *Server) routes() http.Handler {
 			r.Use(s.requireSession)
 
 			r.Delete("/auth", s.handleLogout)
-
-			r.With(cacheControl("private, no-cache")).Get("/tracks", s.handleGetTracks)
-			r.Get("/cover", s.handleGetCover)
-			r.Get("/stream/{stem}", s.handleStreamTrack)
-			r.With(cacheControl("private, max-age=3600")).Get("/lyrics/{stem}", s.handleGetLyrics)
-			r.With(bodyLimiter(102400)).Post("/analytics", s.handleAnalytics) // 100KB
 			r.Get("/session", s.handleSessionCheck)
+			r.Get("/albums", s.handleListAccessibleAlbums)
+
+			// Album-scoped endpoints
+			r.Route("/albums/{slug}", func(r chi.Router) {
+				r.Use(s.requireAlbumAccess)
+				r.With(cacheControl("private, no-cache")).Get("/tracks", s.handleGetTracks)
+				r.Get("/cover", s.handleGetCover)
+				r.Get("/stream/{stem}", s.handleStreamTrack)
+				r.With(cacheControl("private, max-age=3600")).Get("/lyrics/{stem}", s.handleGetLyrics)
+				r.With(bodyLimiter(102400)).Post("/analytics", s.handleAnalytics)
+			})
 		})
 	})
 
@@ -65,23 +70,37 @@ func (s *Server) routes() http.Handler {
 			r.Use(cacheControl("no-store"))
 
 			r.Delete("/api/auth", s.handleAdminLogout)
-			r.Get("/api/analytics", s.handleAdminAnalytics)
 			r.Get("/api/admin-users", s.handleAdminListUsers)
 			r.With(bodyLimiter(4096)).Post("/api/admin-users", s.handleAdminCreateUser)
 			r.With(bodyLimiter(4096)).Put("/api/admin-users/{id}", s.handleAdminUpdateUser)
-			r.Get("/api/tracks", s.handleAdminGetTracks)
-			r.With(bodyLimiter(102400)).Put("/api/tracks", s.handleAdminUpdateTracks)
-			r.With(bodyLimiter(1024)).Put("/api/password", s.handleAdminUpdatePassword)
 			r.With(bodyLimiter(4096)).Put("/api/admin-password", s.handleAdminUpdateAdminPassword)
-			r.With(bodyLimiter(10<<20)).Post("/api/cover", s.handleAdminUploadCover) // 10MB
 			r.Get("/api/config", s.handleAdminGetConfig)
-			r.Get("/api/reconcile", s.handleAdminReconcilePreview)
-			r.With(bodyLimiter(4096)).Post("/api/reconcile", s.handleAdminReconcileApply)
 			r.Get("/api/ops/health", s.handleAdminOpsHealth)
 			r.Get("/api/ops/stats", s.handleAdminOpsStats)
 			r.With(bodyLimiter(4096)).Post("/api/ops/maintenance", s.handleAdminOpsMaintenance)
 			r.Get("/api/export/events", s.handleAdminExportEvents)
 			r.Get("/api/export/backup", s.handleAdminExportBackup)
+
+			// Album CRUD
+			r.Get("/api/albums", s.handleAdminListAlbums)
+			r.With(bodyLimiter(4096)).Post("/api/albums", s.handleAdminCreateAlbum)
+			r.Get("/api/albums/{id}", s.handleAdminGetAlbum)
+			r.With(bodyLimiter(4096)).Put("/api/albums/{id}", s.handleAdminUpdateAlbum)
+			r.Delete("/api/albums/{id}", s.handleAdminDeleteAlbum)
+
+			// Album-scoped admin operations
+			r.Get("/api/albums/{id}/tracks", s.handleAdminGetTracks)
+			r.With(bodyLimiter(102400)).Put("/api/albums/{id}/tracks", s.handleAdminUpdateTracks)
+			r.With(bodyLimiter(10<<20)).Post("/api/albums/{id}/cover", s.handleAdminUploadCover)
+			r.Get("/api/albums/{id}/reconcile", s.handleAdminReconcilePreview)
+			r.With(bodyLimiter(4096)).Post("/api/albums/{id}/reconcile", s.handleAdminReconcileApply)
+			r.Get("/api/albums/{id}/analytics", s.handleAdminAnalytics)
+
+			// Password CRUD
+			r.Get("/api/passwords", s.handleAdminListPasswords)
+			r.With(bodyLimiter(4096)).Post("/api/passwords", s.handleAdminCreatePassword)
+			r.With(bodyLimiter(4096)).Put("/api/passwords/{id}", s.handleAdminUpdatePassword)
+			r.Delete("/api/passwords/{id}", s.handleAdminDeletePassword)
 		})
 
 		// Serve admin static files
@@ -95,10 +114,7 @@ func (s *Server) routes() http.Handler {
 }
 
 // Ensure interfaces are used to prevent "imported and not used" errors.
-var (
-	_ = auth.VerifyPassphrase
-	_ config.Track
-)
+var _ = auth.VerifyPassphrase
 
 // --- Auth handlers ---
 
@@ -118,14 +134,13 @@ func (s *Server) handleAuth(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	cfg := s.config.Get()
-	if cfg.Password == "" {
-		log.Println("WARNING: password not set — rejecting all auth attempts")
-		jsonError(w, "unauthorized", http.StatusUnauthorized)
+	passwordID, albumIDs, err := s.albumStore.VerifyPassword(req.Passphrase)
+	if err != nil {
+		log.Printf("verify password error: %v", err)
+		jsonError(w, "internal error", http.StatusInternalServerError)
 		return
 	}
-
-	if !auth.VerifyPassphrase(req.Passphrase, cfg.Password) {
+	if passwordID == 0 {
 		jsonError(w, "unauthorized", http.StatusUnauthorized)
 		return
 	}
@@ -135,7 +150,7 @@ func (s *Server) handleAuth(w http.ResponseWriter, r *http.Request) {
 		_ = s.sessions.DeleteSession(oldCookie.Value)
 	}
 
-	sessionID, err := s.sessions.CreateSession(clientIP)
+	sessionID, err := s.sessions.CreateSession(clientIP, passwordID)
 	if err != nil {
 		log.Printf("create session error: %v", err)
 		jsonError(w, "internal error", http.StatusInternalServerError)
@@ -158,7 +173,28 @@ func (s *Server) handleAuth(w http.ResponseWriter, r *http.Request) {
 		EventType: "session_start",
 	})
 
-	jsonOK(w, map[string]string{"status": "ok"})
+	// Build album list for response
+	accessibleAlbums, err := s.albumStore.GetAlbumsForPassword(passwordID)
+	if err != nil {
+		log.Printf("get albums for password error: %v", err)
+		accessibleAlbums = nil
+	}
+
+	type albumResponse struct {
+		Slug   string `json:"slug"`
+		Title  string `json:"title"`
+		Artist string `json:"artist"`
+	}
+	albumList := make([]albumResponse, 0, len(accessibleAlbums))
+	for _, a := range accessibleAlbums {
+		albumList = append(albumList, albumResponse{Slug: a.Slug, Title: a.Title, Artist: a.Artist})
+	}
+
+	_ = albumIDs // album IDs already captured via GetAlbumsForPassword
+	jsonOK(w, map[string]interface{}{
+		"status": "ok",
+		"albums": albumList,
+	})
 }
 
 func (s *Server) handleLogout(w http.ResponseWriter, r *http.Request) {
@@ -186,24 +222,68 @@ func (s *Server) handleLogout(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleSessionCheck(w http.ResponseWriter, r *http.Request) {
-	jsonOK(w, map[string]string{"status": "ok"})
+	passwordID := passwordIDFromContext(r)
+	type albumResponse struct {
+		Slug   string `json:"slug"`
+		Title  string `json:"title"`
+		Artist string `json:"artist"`
+	}
+	albumList := make([]albumResponse, 0)
+	if passwordID > 0 {
+		accessibleAlbums, err := s.albumStore.GetAlbumsForPassword(passwordID)
+		if err == nil {
+			for _, a := range accessibleAlbums {
+				albumList = append(albumList, albumResponse{Slug: a.Slug, Title: a.Title, Artist: a.Artist})
+			}
+		}
+	}
+	jsonOK(w, map[string]interface{}{
+		"status": "ok",
+		"albums": albumList,
+	})
+}
+
+func (s *Server) handleListAccessibleAlbums(w http.ResponseWriter, r *http.Request) {
+	passwordID := passwordIDFromContext(r)
+	type albumResponse struct {
+		Slug   string `json:"slug"`
+		Title  string `json:"title"`
+		Artist string `json:"artist"`
+	}
+	albumList := make([]albumResponse, 0)
+	if passwordID > 0 {
+		accessibleAlbums, err := s.albumStore.GetAlbumsForPassword(passwordID)
+		if err == nil {
+			for _, a := range accessibleAlbums {
+				albumList = append(albumList, albumResponse{Slug: a.Slug, Title: a.Title, Artist: a.Artist})
+			}
+		}
+	}
+	jsonOK(w, map[string]interface{}{"albums": albumList})
 }
 
 // --- Content handlers ---
 
 func (s *Server) handleGetTracks(w http.ResponseWriter, r *http.Request) {
-	cfg := s.config.Get()
-	tracks := album.GetTrackList(cfg, s.albumPath)
+	alb := albumFromContext(r)
+	tracks, err := s.albumStore.GetTracks(alb.ID)
+	if err != nil {
+		log.Printf("get tracks error: %v", err)
+		jsonError(w, "internal error", http.StatusInternalServerError)
+		return
+	}
 
+	trackInfos := album.GetTrackList(tracks, alb.AlbumPath)
 	jsonOK(w, map[string]interface{}{
-		"title":  cfg.Title,
-		"artist": cfg.Artist,
-		"tracks": tracks,
+		"title":  alb.Title,
+		"artist": alb.Artist,
+		"tracks": trackInfos,
 	})
 }
 
 func (s *Server) handleGetCover(w http.ResponseWriter, r *http.Request) {
-	album.ServeCover(w, r, s.albumPath, s.dataPath)
+	alb := albumFromContext(r)
+	album.ServeCover(w, r, alb.AlbumPath, s.dataPath)
 }
 
 func (s *Server) handleStreamTrack(w http.ResponseWriter, r *http.Request) {
@@ -219,13 +299,18 @@ func (s *Server) handleStreamTrack(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	cfg := s.config.Get()
-	if !album.StemInConfig(stem, cfg) {
+	alb := albumFromContext(r)
+	tracks, err := s.albumStore.GetTracks(alb.ID)
+	if err != nil {
+		jsonError(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+	if !album.StemInTracks(stem, tracks) {
 		jsonError(w, "bad request", http.StatusBadRequest)
 		return
 	}
 
-	album.StreamTrack(w, r, s.albumPath, stem)
+	album.StreamTrack(w, r, alb.AlbumPath, stem)
 }
 
 func (s *Server) handleGetLyrics(w http.ResponseWriter, r *http.Request) {
@@ -241,13 +326,18 @@ func (s *Server) handleGetLyrics(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	cfg := s.config.Get()
-	if !album.StemInConfig(stem, cfg) {
+	alb := albumFromContext(r)
+	tracks, err := s.albumStore.GetTracks(alb.ID)
+	if err != nil {
+		jsonError(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+	if !album.StemInTracks(stem, tracks) {
 		jsonError(w, "bad request", http.StatusBadRequest)
 		return
 	}
 
-	resp := album.ServeLyrics(w, s.albumPath, stem)
+	resp := album.ServeLyrics(w, alb.AlbumPath, stem)
 	if resp == nil {
 		jsonError(w, "no lyrics", http.StatusNotFound)
 		return
@@ -258,6 +348,7 @@ func (s *Server) handleGetLyrics(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleAnalytics(w http.ResponseWriter, r *http.Request) {
 	sessionID := s.getSessionID(r)
+	alb := albumFromContext(r)
 
 	body, err := io.ReadAll(r.Body)
 	if err != nil {
@@ -265,7 +356,12 @@ func (s *Server) handleAnalytics(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if err := s.collector.RecordBatch(sessionID, body); err != nil {
+	var albumID int64
+	if alb != nil {
+		albumID = alb.ID
+	}
+
+	if err := s.collector.RecordBatch(sessionID, body, albumID); err != nil {
 		jsonError(w, "bad request", http.StatusBadRequest)
 		return
 	}
@@ -375,11 +471,17 @@ func (s *Server) handleAdminLogout(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleAdminAnalytics(w http.ResponseWriter, r *http.Request) {
+	alb := s.adminAlbumFromRequest(w, r)
+	if alb == nil {
+		return
+	}
+
 	filter, err := parseAnalyticsFilter(r.URL.Query())
 	if err != nil {
 		jsonError(w, "bad request", http.StatusBadRequest)
 		return
 	}
+	filter.AlbumID = &alb.ID
 
 	limit := clampInt(parseOptionalInt(r.URL.Query().Get("sessions_limit"), 50), 1, 200)
 
@@ -404,7 +506,6 @@ func (s *Server) handleAdminAnalytics(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Get heatmaps for each track with stats
 	heatmaps := make(map[string][]analytics.DropoutBin)
 	for _, ts := range trackStats {
 		bins, err := analytics.GetDropoutHeatmapFiltered(s.db, ts.Stem, filter)
@@ -428,12 +529,25 @@ func (s *Server) handleAdminAnalytics(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleAdminGetTracks(w http.ResponseWriter, r *http.Request) {
-	cfg := s.config.Get()
-	tracks := album.GetTrackList(cfg, s.albumPath)
-	jsonOK(w, tracks)
+	alb := s.adminAlbumFromRequest(w, r)
+	if alb == nil {
+		return
+	}
+	tracks, err := s.albumStore.GetTracks(alb.ID)
+	if err != nil {
+		jsonError(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+	trackInfos := album.GetTrackList(tracks, alb.AlbumPath)
+	jsonOK(w, trackInfos)
 }
 
 func (s *Server) handleAdminUpdateTracks(w http.ResponseWriter, r *http.Request) {
+	alb := s.adminAlbumFromRequest(w, r)
+	if alb == nil {
+		return
+	}
+
 	var req struct {
 		Title  string `json:"title"`
 		Artist string `json:"artist"`
@@ -448,52 +562,39 @@ func (s *Server) handleAdminUpdateTracks(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	cfg := s.config.Get()
-	if req.Title != "" {
-		cfg.Title = trimAndCollapseSpaces(req.Title)
-	}
-	if req.Artist != "" {
-		cfg.Artist = trimAndCollapseSpaces(req.Artist)
-	}
-	if req.Tracks != nil {
-		normalized, err := normalizeTrackUpdate(req.Tracks, cfg.Tracks, s.albumPath)
-		if err != nil {
-			jsonError(w, "bad request", http.StatusBadRequest)
+	if req.Title != "" || req.Artist != "" {
+		title := alb.Title
+		artist := alb.Artist
+		if req.Title != "" {
+			title = trimAndCollapseSpaces(req.Title)
+		}
+		if req.Artist != "" {
+			artist = trimAndCollapseSpaces(req.Artist)
+		}
+		if err := s.albumStore.UpdateAlbum(alb.ID, title, artist); err != nil {
+			log.Printf("update album error: %v", err)
+			jsonError(w, "internal error", http.StatusInternalServerError)
 			return
 		}
-		cfg.Tracks = normalized
 	}
 
-	if err := s.config.Update(cfg); err != nil {
-		log.Printf("update config error: %v", err)
-		jsonError(w, "internal error", http.StatusInternalServerError)
-		return
-	}
+	if req.Tracks != nil {
+		existingTracks, err := s.albumStore.GetTracks(alb.ID)
+		if err != nil {
+			jsonError(w, "internal error", http.StatusInternalServerError)
+			return
+		}
 
-	jsonOK(w, map[string]string{"status": "ok"})
-}
-
-func (s *Server) handleAdminUpdatePassword(w http.ResponseWriter, r *http.Request) {
-	var req struct {
-		Passphrase string `json:"passphrase"`
-	}
-	if err := decodeJSONBody(r, &req); err != nil {
-		jsonError(w, "bad request", http.StatusBadRequest)
-		return
-	}
-
-	passphrase := strings.TrimSpace(req.Passphrase)
-	if passphrase == "" {
-		jsonError(w, "passphrase cannot be empty", http.StatusBadRequest)
-		return
-	}
-
-	cfg := s.config.Get()
-	cfg.Password = passphrase
-	if err := s.config.Update(cfg); err != nil {
-		log.Printf("update config error: %v", err)
-		jsonError(w, "internal error", http.StatusInternalServerError)
-		return
+		normalized, err := normalizeAdminTrackUpdate(req.Tracks, existingTracks, alb.AlbumPath)
+		if err != nil {
+			jsonError(w, "bad request: "+err.Error(), http.StatusBadRequest)
+			return
+		}
+		if err := s.albumStore.SetTracks(alb.ID, normalized); err != nil {
+			log.Printf("update tracks error: %v", err)
+			jsonError(w, "internal error", http.StatusInternalServerError)
+			return
+		}
 	}
 
 	jsonOK(w, map[string]string{"status": "ok"})
@@ -544,6 +645,11 @@ func (s *Server) handleAdminUpdateAdminPassword(w http.ResponseWriter, r *http.R
 }
 
 func (s *Server) handleAdminUploadCover(w http.ResponseWriter, r *http.Request) {
+	alb := s.adminAlbumFromRequest(w, r)
+	if alb == nil {
+		return
+	}
+
 	file, _, err := r.FormFile("cover")
 	if err != nil {
 		jsonError(w, "bad request", http.StatusBadRequest)
@@ -586,7 +692,7 @@ func (s *Server) handleAdminUploadCover(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	coverPath := filepath.Join(s.dataPath, "cover_override.jpg")
+	coverPath := filepath.Join(alb.AlbumPath, "cover_override.jpg")
 	if err := os.WriteFile(coverPath, encoded.Bytes(), 0644); err != nil {
 		log.Printf("write cover error: %v", err)
 		jsonError(w, "internal error", http.StatusInternalServerError)
@@ -597,7 +703,6 @@ func (s *Server) handleAdminUploadCover(w http.ResponseWriter, r *http.Request) 
 }
 
 func (s *Server) handleAdminGetConfig(w http.ResponseWriter, r *http.Request) {
-	cfg := s.config.Get()
 	adminUsername := ""
 	passwordResetRequired := false
 	if adminUserID, ok := adminUserIDFromContext(r); ok {
@@ -607,14 +712,14 @@ func (s *Server) handleAdminGetConfig(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	albumCount, _ := s.albumStore.AlbumCount()
+	passwords, _ := s.albumStore.ListPasswords()
+
 	jsonOK(w, map[string]interface{}{
-		"title":                   cfg.Title,
-		"artist":                  cfg.Artist,
 		"admin_user":              adminUsername,
 		"password_reset_required": passwordResetRequired,
-		"password_set":            cfg.Password != "",
-		"password":                cfg.Password,
-		"track_count":             len(cfg.Tracks),
+		"album_count":             albumCount,
+		"password_count":          len(passwords),
 	})
 }
 
@@ -682,11 +787,11 @@ func (s *Server) handleAdminStatic(w http.ResponseWriter, r *http.Request) {
 	serveEmbeddedFile(w, r, staticFS, path)
 }
 
-func normalizeTrackUpdate(input []struct {
+func normalizeAdminTrackUpdate(input []struct {
 	Stem         string `json:"stem"`
 	Title        string `json:"title"`
 	DisplayIndex string `json:"display_index,omitempty"`
-}, existing []config.Track, albumPath string) ([]config.Track, error) {
+}, existing []albums.Track, albumPath string) ([]albums.Track, error) {
 	if len(input) == 0 || len(input) != len(existing) {
 		return nil, errors.New("invalid track count")
 	}
@@ -697,9 +802,9 @@ func normalizeTrackUpdate(input []struct {
 	}
 
 	seen := make(map[string]struct{}, len(input))
-	normalized := make([]config.Track, 0, len(input))
+	normalized := make([]albums.Track, 0, len(input))
 
-	for _, t := range input {
+	for i, t := range input {
 		stem := strings.TrimSpace(t.Stem)
 		title := trimAndCollapseSpaces(t.Title)
 		display := strings.TrimSpace(t.DisplayIndex)
@@ -718,14 +823,36 @@ func normalizeTrackUpdate(input []struct {
 		}
 
 		seen[stem] = struct{}{}
-		normalized = append(normalized, config.Track{
+		normalized = append(normalized, albums.Track{
 			Stem:         stem,
 			Title:        title,
 			DisplayIndex: display,
+			SortOrder:    i,
 		})
 	}
 
 	return normalized, nil
+}
+
+// adminAlbumFromRequest extracts and validates the album {id} from the admin URL.
+func (s *Server) adminAlbumFromRequest(w http.ResponseWriter, r *http.Request) *albums.Album {
+	idStr := chi.URLParam(r, "id")
+	id, err := strconv.ParseInt(idStr, 10, 64)
+	if err != nil || id <= 0 {
+		jsonError(w, "bad request", http.StatusBadRequest)
+		return nil
+	}
+	alb, err := s.albumStore.GetAlbum(id)
+	if err != nil {
+		log.Printf("get album error: %v", err)
+		jsonError(w, "internal error", http.StatusInternalServerError)
+		return nil
+	}
+	if alb == nil {
+		jsonError(w, "album not found", http.StatusNotFound)
+		return nil
+	}
+	return alb
 }
 
 func serveEmbeddedFile(w http.ResponseWriter, r *http.Request, fsys fs.FS, path string) {

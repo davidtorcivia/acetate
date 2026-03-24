@@ -58,7 +58,7 @@ func (s *SessionStore) Close() {
 }
 
 // CreateSession generates a new listener session and stores it.
-func (s *SessionStore) CreateSession(ip string) (string, error) {
+func (s *SessionStore) CreateSession(ip string, passwordID int64) (string, error) {
 	id, err := generateSessionID()
 	if err != nil {
 		return "", err
@@ -68,8 +68,8 @@ func (s *SessionStore) CreateSession(ip string) (string, error) {
 	now := time.Now().UTC()
 
 	_, err = s.db.Exec(
-		"INSERT INTO sessions (id, started_at, last_seen_at, ip_hash) VALUES (?, ?, ?, ?)",
-		id, now, now, ipHash,
+		"INSERT INTO sessions (id, started_at, last_seen_at, ip_hash, password_id) VALUES (?, ?, ?, ?, ?)",
+		id, now, now, ipHash, passwordID,
 	)
 	if err != nil {
 		return "", fmt.Errorf("create session: %w", err)
@@ -79,34 +79,40 @@ func (s *SessionStore) CreateSession(ip string) (string, error) {
 }
 
 // ValidateSession checks if a session ID is valid and not expired.
-// On success, it updates last_seen_at (sliding window).
-func (s *SessionStore) ValidateSession(id string) (bool, error) {
+// On success, it updates last_seen_at (sliding window) and returns the password_id.
+func (s *SessionStore) ValidateSession(id string) (bool, int64, error) {
 	var lastSeen time.Time
+	var passwordID sql.NullInt64
 	err := s.db.QueryRow(
-		"SELECT last_seen_at FROM sessions WHERE id = ?", id,
-	).Scan(&lastSeen)
+		"SELECT last_seen_at, password_id FROM sessions WHERE id = ?", id,
+	).Scan(&lastSeen, &passwordID)
 	if err == sql.ErrNoRows {
-		return false, nil
+		return false, 0, nil
 	}
 	if err != nil {
-		return false, fmt.Errorf("query session: %w", err)
+		return false, 0, fmt.Errorf("query session: %w", err)
 	}
 
 	now := time.Now().UTC()
 	if now.Sub(lastSeen.UTC()) > SessionExpiry {
 		if _, err := s.db.Exec("DELETE FROM sessions WHERE id = ?", id); err != nil {
-			return false, fmt.Errorf("delete expired session: %w", err)
+			return false, 0, fmt.Errorf("delete expired session: %w", err)
 		}
-		return false, nil
+		return false, 0, nil
 	}
 
 	// Update sliding window at most once per minute to reduce write amplification.
 	if now.Sub(lastSeen.UTC()) >= SessionTouchWindow {
 		if _, err := s.db.Exec("UPDATE sessions SET last_seen_at = ? WHERE id = ?", now, id); err != nil {
-			return false, fmt.Errorf("touch session: %w", err)
+			return false, 0, fmt.Errorf("touch session: %w", err)
 		}
 	}
-	return true, nil
+
+	var pwID int64
+	if passwordID.Valid {
+		pwID = passwordID.Int64
+	}
+	return true, pwID, nil
 }
 
 // DeleteSession removes a listener session.

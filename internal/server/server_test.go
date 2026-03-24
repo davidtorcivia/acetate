@@ -3,6 +3,7 @@ package server
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"io"
 	"mime/multipart"
 	"net/http"
@@ -14,17 +15,19 @@ import (
 	"testing"
 	"time"
 
-	"acetate/internal/config"
+	"acetate/internal/albums"
 	"acetate/internal/database"
 
 	"golang.org/x/crypto/bcrypt"
 )
 
 type testEnv struct {
-	srv      *Server
-	ts       *httptest.Server
-	albumDir string
-	dataDir  string
+	srv       *Server
+	ts        *httptest.Server
+	albumDir  string
+	dataDir   string
+	albumSlug string
+	albumID   int64
 }
 
 const (
@@ -61,24 +64,32 @@ func setupTestWithBootstrap(t *testing.T, username, password, passwordHash strin
 		}
 	}
 
-	// Create config with a password
-	hash, _ := bcrypt.GenerateFromPassword([]byte("testpass"), bcrypt.MinCost)
-	cfgMgr, err := config.NewManager(dataDir, albumDir)
+	// Create album store and seed album, tracks, and listener password
+	store := albums.NewStore(db)
+
+	alb, err := store.CreateAlbum("Album Title", "Test Artist", albumDir)
 	if err != nil {
-		t.Fatalf("config manager: %v", err)
+		t.Fatalf("create album: %v", err)
 	}
-	cfg := cfgMgr.Get()
-	cfg.Password = string(hash)
-	cfgMgr.Update(cfg)
+
+	if err := store.SetTracks(alb.ID, []albums.Track{
+		{Stem: "01-gathering", Title: "Gathering", DisplayIndex: "1"},
+		{Stem: "02-hollow", Title: "Hollow", DisplayIndex: "2"},
+	}); err != nil {
+		t.Fatalf("set tracks: %v", err)
+	}
+
+	if _, err := store.CreatePassword("Default", "testpass", []int64{alb.ID}); err != nil {
+		t.Fatalf("create password: %v", err)
+	}
 
 	srv := New(Config{
 		ListenAddr:             ":0",
-		AlbumPath:              albumDir,
 		DataPath:               dataDir,
 		AnalyticsRetentionDays: 0,
 		MaintenanceInterval:    time.Hour,
 		DB:                     db,
-		ConfigMgr:              cfgMgr,
+		AlbumStore:             store,
 	})
 
 	ts := httptest.NewServer(srv.routes())
@@ -90,7 +101,7 @@ func setupTestWithBootstrap(t *testing.T, username, password, passwordHash strin
 		srv.cfIPs.Close()
 	})
 
-	return &testEnv{srv: srv, ts: ts, albumDir: albumDir, dataDir: dataDir}
+	return &testEnv{srv: srv, ts: ts, albumDir: albumDir, dataDir: dataDir, albumSlug: alb.Slug, albumID: alb.ID}
 }
 
 func (env *testEnv) authenticate(t *testing.T) []*http.Cookie {
@@ -105,6 +116,25 @@ func (env *testEnv) authenticate(t *testing.T) []*http.Cookie {
 
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("auth status = %d, want 200", resp.StatusCode)
+	}
+
+	// Parse response to verify album slug is returned
+	var authResp struct {
+		Status string `json:"status"`
+		Albums []struct {
+			Slug   string `json:"slug"`
+			Title  string `json:"title"`
+			Artist string `json:"artist"`
+		} `json:"albums"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&authResp); err != nil {
+		t.Fatalf("decode auth response: %v", err)
+	}
+	if authResp.Status != "ok" {
+		t.Fatalf("auth response status = %q, want ok", authResp.Status)
+	}
+	if len(authResp.Albums) > 0 {
+		env.albumSlug = authResp.Albums[0].Slug
 	}
 
 	return resp.Cookies()
@@ -185,7 +215,7 @@ func TestSessionGating(t *testing.T) {
 	env := setupTest(t)
 
 	// Without session → 401
-	resp, err := env.ts.Client().Get(env.ts.URL + "/api/tracks")
+	resp, err := env.ts.Client().Get(env.ts.URL + "/api/albums/" + env.albumSlug + "/tracks")
 	if err != nil {
 		t.Fatalf("tracks request: %v", err)
 	}
@@ -196,7 +226,7 @@ func TestSessionGating(t *testing.T) {
 
 	// With session → 200
 	cookies := env.authenticate(t)
-	req, _ := http.NewRequest("GET", env.ts.URL+"/api/tracks", nil)
+	req, _ := http.NewRequest("GET", env.ts.URL+"/api/albums/"+env.albumSlug+"/tracks", nil)
 	for _, c := range cookies {
 		req.AddCookie(c)
 	}
@@ -221,7 +251,7 @@ func TestStreamTrack(t *testing.T) {
 	env := setupTest(t)
 	cookies := env.authenticate(t)
 
-	req, _ := http.NewRequest("GET", env.ts.URL+"/api/stream/01-gathering", nil)
+	req, _ := http.NewRequest("GET", env.ts.URL+"/api/albums/"+env.albumSlug+"/stream/01-gathering", nil)
 	for _, c := range cookies {
 		req.AddCookie(c)
 	}
@@ -245,7 +275,7 @@ func TestStreamTrackPathTraversal(t *testing.T) {
 
 	badStems := []string{"../etc/passwd", "track.mp3", "track/../../etc/passwd"}
 	for _, stem := range badStems {
-		req, _ := http.NewRequest("GET", env.ts.URL+"/api/stream/"+stem, nil)
+		req, _ := http.NewRequest("GET", env.ts.URL+"/api/albums/"+env.albumSlug+"/stream/"+stem, nil)
 		for _, c := range cookies {
 			req.AddCookie(c)
 		}
@@ -268,14 +298,18 @@ func TestStreamTrackStemWithSpaces(t *testing.T) {
 		t.Fatalf("write track: %v", err)
 	}
 
-	cfg := env.srv.config.Get()
-	cfg.Tracks = append(cfg.Tracks, config.Track{Stem: stem, Title: "Space Name"})
-	if err := env.srv.config.Update(cfg); err != nil {
-		t.Fatalf("update config: %v", err)
+	// Add the new track to the album's track list via albumStore
+	existingTracks, err := env.srv.albumStore.GetTracks(env.albumID)
+	if err != nil {
+		t.Fatalf("get tracks: %v", err)
+	}
+	existingTracks = append(existingTracks, albums.Track{Stem: stem, Title: "Space Name"})
+	if err := env.srv.albumStore.SetTracks(env.albumID, existingTracks); err != nil {
+		t.Fatalf("set tracks: %v", err)
 	}
 
 	cookies := env.authenticate(t)
-	req, _ := http.NewRequest("GET", env.ts.URL+"/api/stream/03%20-%20Space%20Name%20%281%29", nil)
+	req, _ := http.NewRequest("GET", env.ts.URL+"/api/albums/"+env.albumSlug+"/stream/03%20-%20Space%20Name%20%281%29", nil)
 	for _, c := range cookies {
 		req.AddCookie(c)
 	}
@@ -295,7 +329,7 @@ func TestLyrics(t *testing.T) {
 	env := setupTest(t)
 	cookies := env.authenticate(t)
 
-	req, _ := http.NewRequest("GET", env.ts.URL+"/api/lyrics/01-gathering", nil)
+	req, _ := http.NewRequest("GET", env.ts.URL+"/api/albums/"+env.albumSlug+"/lyrics/01-gathering", nil)
 	for _, c := range cookies {
 		req.AddCookie(c)
 	}
@@ -320,7 +354,7 @@ func TestCover(t *testing.T) {
 	env := setupTest(t)
 	cookies := env.authenticate(t)
 
-	req, _ := http.NewRequest("GET", env.ts.URL+"/api/cover", nil)
+	req, _ := http.NewRequest("GET", env.ts.URL+"/api/albums/"+env.albumSlug+"/cover", nil)
 	for _, c := range cookies {
 		req.AddCookie(c)
 	}
@@ -349,7 +383,7 @@ func TestCoverSupportsJPEGFallback(t *testing.T) {
 		t.Fatalf("write cover.jpeg: %v", err)
 	}
 
-	req, _ := http.NewRequest("GET", env.ts.URL+"/api/cover", nil)
+	req, _ := http.NewRequest("GET", env.ts.URL+"/api/albums/"+env.albumSlug+"/cover", nil)
 	for _, c := range cookies {
 		req.AddCookie(c)
 	}
@@ -512,7 +546,7 @@ func TestAdminUpdateTracksValidation(t *testing.T) {
 			{"stem": "02-hollow", "title": "Hollow"},
 		},
 	})
-	req, _ := http.NewRequest(http.MethodPut, env.ts.URL+"/admin/api/tracks", bytes.NewReader(body))
+	req, _ := http.NewRequest(http.MethodPut, env.ts.URL+fmt.Sprintf("/admin/api/albums/%d/tracks", env.albumID), bytes.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Origin", env.ts.URL)
 	for _, c := range adminCookies {
@@ -544,7 +578,7 @@ func TestAdminUploadCoverRejectsNonImage(t *testing.T) {
 	}
 	writer.Close()
 
-	req, _ := http.NewRequest(http.MethodPost, env.ts.URL+"/admin/api/cover", &body)
+	req, _ := http.NewRequest(http.MethodPost, env.ts.URL+fmt.Sprintf("/admin/api/albums/%d/cover", env.albumID), &body)
 	req.Header.Set("Content-Type", writer.FormDataContentType())
 	req.Header.Set("Origin", env.ts.URL)
 	for _, c := range adminCookies {
@@ -611,7 +645,7 @@ func TestAnalyticsEndpoint(t *testing.T) {
 	}
 	body, _ := json.Marshal(events)
 
-	req, _ := http.NewRequest("POST", env.ts.URL+"/api/analytics", bytes.NewReader(body))
+	req, _ := http.NewRequest("POST", env.ts.URL+"/api/albums/"+env.albumSlug+"/analytics", bytes.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 	for _, c := range cookies {
 		req.AddCookie(c)
@@ -647,7 +681,7 @@ func TestLogout(t *testing.T) {
 	}
 
 	// Session should be invalid now
-	req, _ = http.NewRequest("GET", env.ts.URL+"/api/tracks", nil)
+	req, _ = http.NewRequest("GET", env.ts.URL+"/api/session", nil)
 	for _, c := range cookies {
 		req.AddCookie(c)
 	}
@@ -840,7 +874,7 @@ func TestAdminUserManagementAndForcedPasswordResetFlow(t *testing.T) {
 		t.Fatalf("expected password_reset_required=true, got payload=%v", authPayload)
 	}
 
-	analyticsReq, _ := http.NewRequest(http.MethodGet, env.ts.URL+"/admin/api/analytics", nil)
+	analyticsReq, _ := http.NewRequest(http.MethodGet, env.ts.URL+fmt.Sprintf("/admin/api/albums/%d/analytics", env.albumID), nil)
 	for _, c := range opsCookies {
 		analyticsReq.AddCookie(c)
 	}
@@ -918,7 +952,7 @@ func TestAdminUserManagementAndForcedPasswordResetFlow(t *testing.T) {
 		t.Fatalf("expected password_reset_required=false, got payload=%v", newAuthPayload)
 	}
 
-	analyticsReq2, _ := http.NewRequest(http.MethodGet, env.ts.URL+"/admin/api/analytics", nil)
+	analyticsReq2, _ := http.NewRequest(http.MethodGet, env.ts.URL+fmt.Sprintf("/admin/api/albums/%d/analytics", env.albumID), nil)
 	for _, c := range newOpsCookies {
 		analyticsReq2.AddCookie(c)
 	}
@@ -956,7 +990,7 @@ func TestAdminUserManagementAndForcedPasswordResetFlow(t *testing.T) {
 	}
 }
 
-func TestAdminConfigDoesNotExposePasswordHash(t *testing.T) {
+func TestAdminConfigEndpoint(t *testing.T) {
 	env := setupTest(t)
 	adminCookies := env.authenticateAdmin(t)
 
@@ -984,52 +1018,9 @@ func TestAdminConfigDoesNotExposePasswordHash(t *testing.T) {
 		t.Fatalf("password_hash should not be exposed in config payload: %+v", payload)
 	}
 
-	passwordSet, ok := payload["password_set"].(bool)
-	if !ok || !passwordSet {
-		t.Fatalf("expected password_set=true, got payload=%+v", payload)
-	}
-	if _, ok := payload["password"].(string); !ok {
-		t.Fatalf("expected password string in config payload, got %+v", payload)
-	}
-}
-
-func TestAdminUpdateListeningPasswordStoresPlaintext(t *testing.T) {
-	env := setupTest(t)
-	adminCookies := env.authenticateAdmin(t)
-
-	updateBody, _ := json.Marshal(map[string]string{
-		"passphrase": "plain-visible-passphrase",
-	})
-	updateReq, _ := http.NewRequest(http.MethodPut, env.ts.URL+"/admin/api/password", bytes.NewReader(updateBody))
-	updateReq.Header.Set("Content-Type", "application/json")
-	updateReq.Header.Set("Origin", env.ts.URL)
-	for _, c := range adminCookies {
-		updateReq.AddCookie(c)
-	}
-
-	updateResp, err := env.ts.Client().Do(updateReq)
-	if err != nil {
-		t.Fatalf("update listening password request: %v", err)
-	}
-	updateResp.Body.Close()
-	if updateResp.StatusCode != http.StatusOK {
-		t.Fatalf("update listening password status = %d, want 200", updateResp.StatusCode)
-	}
-
-	cfg := env.srv.config.Get()
-	if cfg.Password != "plain-visible-passphrase" {
-		t.Fatalf("stored listener password = %q, want plaintext value", cfg.Password)
-	}
-
-	// Listener auth should still succeed with plaintext-configured password.
-	authBody, _ := json.Marshal(map[string]string{"passphrase": "plain-visible-passphrase"})
-	authResp, err := env.ts.Client().Post(env.ts.URL+"/api/auth", "application/json", bytes.NewReader(authBody))
-	if err != nil {
-		t.Fatalf("listener auth request: %v", err)
-	}
-	authResp.Body.Close()
-	if authResp.StatusCode != http.StatusOK {
-		t.Fatalf("listener auth status = %d, want 200", authResp.StatusCode)
+	albumCount, ok := payload["album_count"].(float64)
+	if !ok || albumCount < 1 {
+		t.Fatalf("expected album_count >= 1, got payload=%+v", payload)
 	}
 }
 
@@ -1167,7 +1158,7 @@ func TestAdminAnalyticsFiltersByStem(t *testing.T) {
 	_, _ = env.srv.db.Exec("INSERT INTO events (session_id, event_type, track_stem, created_at) VALUES ('s1', 'play', '01-gathering', datetime('now'))")
 	_, _ = env.srv.db.Exec("INSERT INTO events (session_id, event_type, track_stem, created_at) VALUES ('s2', 'play', '02-hollow', datetime('now'))")
 
-	req, _ := http.NewRequest(http.MethodGet, env.ts.URL+"/admin/api/analytics?stems=01-gathering", nil)
+	req, _ := http.NewRequest(http.MethodGet, env.ts.URL+fmt.Sprintf("/admin/api/albums/%d/analytics?stems=01-gathering", env.albumID), nil)
 	for _, c := range adminCookies {
 		req.AddCookie(c)
 	}
@@ -1203,7 +1194,7 @@ func TestAdminReconcilePreview(t *testing.T) {
 		t.Fatalf("write new song: %v", err)
 	}
 
-	req, _ := http.NewRequest(http.MethodGet, env.ts.URL+"/admin/api/reconcile", nil)
+	req, _ := http.NewRequest(http.MethodGet, env.ts.URL+fmt.Sprintf("/admin/api/albums/%d/reconcile", env.albumID), nil)
 	for _, c := range adminCookies {
 		req.AddCookie(c)
 	}
@@ -1268,7 +1259,7 @@ func TestAdminExportEventsCSV(t *testing.T) {
 		{"event_type": "play", "track_stem": "01-gathering"},
 	}
 	body, _ := json.Marshal(events)
-	req, _ := http.NewRequest(http.MethodPost, env.ts.URL+"/api/analytics", bytes.NewReader(body))
+	req, _ := http.NewRequest(http.MethodPost, env.ts.URL+"/api/albums/"+env.albumSlug+"/analytics", bytes.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 	for _, c := range listenerCookies {
 		req.AddCookie(c)
@@ -1306,5 +1297,325 @@ func TestAdminExportEventsCSV(t *testing.T) {
 	bodyText := string(data)
 	if !strings.Contains(bodyText, "event_type") || !strings.Contains(bodyText, "play") {
 		t.Fatalf("unexpected csv body: %q", bodyText)
+	}
+}
+
+// --- Multi-album tests ---
+
+func TestMultiAlbumAuthReturnsAlbumList(t *testing.T) {
+	env := setupTest(t)
+
+	// Create a second album and link the same password to both
+	album2Dir := t.TempDir()
+	os.WriteFile(filepath.Join(album2Dir, "track-a.mp3"), []byte("fake"), 0644)
+
+	alb2, err := env.srv.albumStore.CreateAlbum("Second Album", "Artist 2", album2Dir)
+	if err != nil {
+		t.Fatalf("create album 2: %v", err)
+	}
+	env.srv.albumStore.SetTracks(alb2.ID, []albums.Track{
+		{Stem: "track-a", Title: "Track A"},
+	})
+
+	// Create a password that grants access to both albums
+	pw, err := env.srv.albumStore.CreatePassword("Multi", "multipass", []int64{env.albumID, alb2.ID})
+	if err != nil {
+		t.Fatalf("create multi password: %v", err)
+	}
+	_ = pw
+
+	// Auth with multi-album password
+	body, _ := json.Marshal(map[string]string{"passphrase": "multipass"})
+	resp, err := env.ts.Client().Post(env.ts.URL+"/api/auth", "application/json", bytes.NewReader(body))
+	if err != nil {
+		t.Fatalf("auth: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("auth status = %d, want 200", resp.StatusCode)
+	}
+
+	var authResp struct {
+		Status string `json:"status"`
+		Albums []struct {
+			Slug  string `json:"slug"`
+			Title string `json:"title"`
+		} `json:"albums"`
+	}
+	json.NewDecoder(resp.Body).Decode(&authResp)
+
+	if len(authResp.Albums) != 2 {
+		t.Fatalf("expected 2 albums, got %d", len(authResp.Albums))
+	}
+}
+
+func TestMultiAlbumAccessDeniedForUnauthorizedAlbum(t *testing.T) {
+	env := setupTest(t)
+
+	// Create a second album NOT linked to the default password
+	album2Dir := t.TempDir()
+	os.WriteFile(filepath.Join(album2Dir, "secret-track.mp3"), []byte("fake"), 0644)
+
+	alb2, err := env.srv.albumStore.CreateAlbum("Secret Album", "Secret Artist", album2Dir)
+	if err != nil {
+		t.Fatalf("create secret album: %v", err)
+	}
+	env.srv.albumStore.SetTracks(alb2.ID, []albums.Track{
+		{Stem: "secret-track", Title: "Secret Track"},
+	})
+
+	// Auth with default password (only has access to album 1)
+	cookies := env.authenticate(t)
+
+	// Try to access the secret album's tracks
+	req, _ := http.NewRequest("GET", env.ts.URL+"/api/albums/"+alb2.Slug+"/tracks", nil)
+	for _, c := range cookies {
+		req.AddCookie(c)
+	}
+	resp, err := env.ts.Client().Do(req)
+	if err != nil {
+		t.Fatalf("tracks request: %v", err)
+	}
+	resp.Body.Close()
+
+	if resp.StatusCode != http.StatusForbidden {
+		t.Fatalf("unauthorized album access status = %d, want 403", resp.StatusCode)
+	}
+}
+
+func TestMultiAlbumStreamFromCorrectDirectory(t *testing.T) {
+	env := setupTest(t)
+
+	// Create a second album with its own tracks
+	album2Dir := t.TempDir()
+	os.WriteFile(filepath.Join(album2Dir, "unique-track.mp3"), []byte("album2-audio-data"), 0644)
+
+	alb2, err := env.srv.albumStore.CreateAlbum("Album Two", "Artist Two", album2Dir)
+	if err != nil {
+		t.Fatalf("create album 2: %v", err)
+	}
+	env.srv.albumStore.SetTracks(alb2.ID, []albums.Track{
+		{Stem: "unique-track", Title: "Unique"},
+	})
+
+	// Create password for album 2
+	env.srv.albumStore.CreatePassword("PW2", "album2pass", []int64{alb2.ID})
+
+	// Auth with album 2 password
+	body, _ := json.Marshal(map[string]string{"passphrase": "album2pass"})
+	resp, err := env.ts.Client().Post(env.ts.URL+"/api/auth", "application/json", bytes.NewReader(body))
+	if err != nil {
+		t.Fatalf("auth: %v", err)
+	}
+	resp.Body.Close()
+	cookies := resp.Cookies()
+
+	// Stream from album 2
+	req, _ := http.NewRequest("GET", env.ts.URL+"/api/albums/"+alb2.Slug+"/stream/unique-track", nil)
+	for _, c := range cookies {
+		req.AddCookie(c)
+	}
+	streamResp, err := env.ts.Client().Do(req)
+	if err != nil {
+		t.Fatalf("stream request: %v", err)
+	}
+	defer streamResp.Body.Close()
+
+	if streamResp.StatusCode != http.StatusOK {
+		t.Fatalf("stream status = %d, want 200", streamResp.StatusCode)
+	}
+
+	streamBody, _ := io.ReadAll(streamResp.Body)
+	if string(streamBody) != "album2-audio-data" {
+		t.Fatalf("stream returned wrong data: %q", string(streamBody))
+	}
+
+	// Verify can't access album 1's tracks with album 2's password
+	req2, _ := http.NewRequest("GET", env.ts.URL+"/api/albums/"+env.albumSlug+"/tracks", nil)
+	for _, c := range cookies {
+		req2.AddCookie(c)
+	}
+	resp2, err := env.ts.Client().Do(req2)
+	if err != nil {
+		t.Fatalf("cross-album request: %v", err)
+	}
+	resp2.Body.Close()
+
+	if resp2.StatusCode != http.StatusForbidden {
+		t.Fatalf("cross-album access status = %d, want 403", resp2.StatusCode)
+	}
+}
+
+func TestAdminAlbumCRUD(t *testing.T) {
+	env := setupTest(t)
+	adminCookies := env.authenticateAdmin(t)
+
+	// List albums
+	req, _ := http.NewRequest("GET", env.ts.URL+"/admin/api/albums", nil)
+	for _, c := range adminCookies {
+		req.AddCookie(c)
+	}
+	resp, _ := env.ts.Client().Do(req)
+	var listResp struct {
+		Albums []struct {
+			ID    int64  `json:"id"`
+			Title string `json:"title"`
+		} `json:"albums"`
+	}
+	json.NewDecoder(resp.Body).Decode(&listResp)
+	resp.Body.Close()
+	if len(listResp.Albums) != 1 {
+		t.Fatalf("expected 1 album, got %d", len(listResp.Albums))
+	}
+
+	// Create a new album
+	newAlbumDir := t.TempDir()
+	createBody, _ := json.Marshal(map[string]string{
+		"title":      "New Album",
+		"artist":     "New Artist",
+		"album_path": newAlbumDir,
+	})
+	createReq, _ := http.NewRequest("POST", env.ts.URL+"/admin/api/albums", bytes.NewReader(createBody))
+	createReq.Header.Set("Content-Type", "application/json")
+	createReq.Header.Set("Origin", env.ts.URL)
+	for _, c := range adminCookies {
+		createReq.AddCookie(c)
+	}
+	createResp, _ := env.ts.Client().Do(createReq)
+	if createResp.StatusCode != http.StatusCreated {
+		t.Fatalf("create album status = %d, want 201", createResp.StatusCode)
+	}
+	var created struct {
+		ID   int64  `json:"id"`
+		Slug string `json:"slug"`
+	}
+	json.NewDecoder(createResp.Body).Decode(&created)
+	createResp.Body.Close()
+
+	if created.ID == 0 || created.Slug == "" {
+		t.Fatalf("expected created album with ID and slug, got %+v", created)
+	}
+
+	// Delete the album
+	deleteReq, _ := http.NewRequest("DELETE", env.ts.URL+"/admin/api/albums/"+strconv.FormatInt(created.ID, 10), nil)
+	deleteReq.Header.Set("Origin", env.ts.URL)
+	for _, c := range adminCookies {
+		deleteReq.AddCookie(c)
+	}
+	deleteResp, _ := env.ts.Client().Do(deleteReq)
+	deleteResp.Body.Close()
+	if deleteResp.StatusCode != http.StatusOK {
+		t.Fatalf("delete album status = %d, want 200", deleteResp.StatusCode)
+	}
+
+	// Verify it's gone
+	req2, _ := http.NewRequest("GET", env.ts.URL+"/admin/api/albums", nil)
+	for _, c := range adminCookies {
+		req2.AddCookie(c)
+	}
+	resp2, _ := env.ts.Client().Do(req2)
+	json.NewDecoder(resp2.Body).Decode(&listResp)
+	resp2.Body.Close()
+	if len(listResp.Albums) != 1 {
+		t.Fatalf("expected 1 album after delete, got %d", len(listResp.Albums))
+	}
+}
+
+func TestAdminPasswordCRUD(t *testing.T) {
+	env := setupTest(t)
+	adminCookies := env.authenticateAdmin(t)
+
+	// Create a password linked to the test album
+	createBody, _ := json.Marshal(map[string]interface{}{
+		"label":      "Test PW",
+		"passphrase": "new-listener-pass",
+		"album_ids":  []int64{env.albumID},
+	})
+	createReq, _ := http.NewRequest("POST", env.ts.URL+"/admin/api/passwords", bytes.NewReader(createBody))
+	createReq.Header.Set("Content-Type", "application/json")
+	createReq.Header.Set("Origin", env.ts.URL)
+	for _, c := range adminCookies {
+		createReq.AddCookie(c)
+	}
+	createResp, _ := env.ts.Client().Do(createReq)
+	if createResp.StatusCode != http.StatusCreated {
+		t.Fatalf("create password status = %d, want 201", createResp.StatusCode)
+	}
+	var created struct {
+		ID int64 `json:"id"`
+	}
+	json.NewDecoder(createResp.Body).Decode(&created)
+	createResp.Body.Close()
+
+	// Verify the new password works for auth
+	authBody, _ := json.Marshal(map[string]string{"passphrase": "new-listener-pass"})
+	authResp, _ := env.ts.Client().Post(env.ts.URL+"/api/auth", "application/json", bytes.NewReader(authBody))
+	if authResp.StatusCode != http.StatusOK {
+		t.Fatalf("auth with new password status = %d, want 200", authResp.StatusCode)
+	}
+	authResp.Body.Close()
+
+	// List passwords
+	listReq, _ := http.NewRequest("GET", env.ts.URL+"/admin/api/passwords", nil)
+	for _, c := range adminCookies {
+		listReq.AddCookie(c)
+	}
+	listResp, _ := env.ts.Client().Do(listReq)
+	var pwList struct {
+		Passwords []struct {
+			ID    int64  `json:"id"`
+			Label string `json:"label"`
+		} `json:"passwords"`
+	}
+	json.NewDecoder(listResp.Body).Decode(&pwList)
+	listResp.Body.Close()
+	if len(pwList.Passwords) != 2 { // Default + Test PW
+		t.Fatalf("expected 2 passwords, got %d", len(pwList.Passwords))
+	}
+
+	// Delete the new password
+	deleteReq, _ := http.NewRequest("DELETE", env.ts.URL+fmt.Sprintf("/admin/api/passwords/%d", created.ID), nil)
+	deleteReq.Header.Set("Origin", env.ts.URL)
+	for _, c := range adminCookies {
+		deleteReq.AddCookie(c)
+	}
+	deleteResp, _ := env.ts.Client().Do(deleteReq)
+	deleteResp.Body.Close()
+	if deleteResp.StatusCode != http.StatusOK {
+		t.Fatalf("delete password status = %d, want 200", deleteResp.StatusCode)
+	}
+
+	// Verify deleted password no longer works
+	authResp2, _ := env.ts.Client().Post(env.ts.URL+"/api/auth", "application/json", bytes.NewReader(authBody))
+	authResp2.Body.Close()
+	if authResp2.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("deleted password auth status = %d, want 401", authResp2.StatusCode)
+	}
+}
+
+func TestSessionWithoutPasswordIDDenied(t *testing.T) {
+	env := setupTest(t)
+
+	// Manually insert a session without password_id to simulate a legacy session
+	_, err := env.srv.db.Exec(
+		"INSERT INTO sessions (id, started_at, last_seen_at, ip_hash) VALUES (?, ?, ?, ?)",
+		"deadbeef"+strings.Repeat("00", 28), time.Now().UTC(), time.Now().UTC(), "test",
+	)
+	if err != nil {
+		t.Fatalf("insert legacy session: %v", err)
+	}
+
+	// Try to access an album with the legacy session (no password_id)
+	req, _ := http.NewRequest("GET", env.ts.URL+"/api/albums/"+env.albumSlug+"/tracks", nil)
+	req.AddCookie(&http.Cookie{Name: "acetate_session", Value: "deadbeef" + strings.Repeat("00", 28)})
+	resp, err := env.ts.Client().Do(req)
+	if err != nil {
+		t.Fatalf("request: %v", err)
+	}
+	resp.Body.Close()
+
+	if resp.StatusCode != http.StatusForbidden {
+		t.Fatalf("legacy session access status = %d, want 403", resp.StatusCode)
 	}
 }

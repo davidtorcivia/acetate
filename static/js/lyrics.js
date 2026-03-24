@@ -38,7 +38,7 @@
             return;
         }
 
-        fetch('/api/lyrics/' + encodePathSegment(stem), { credentials: 'same-origin' })
+        fetch(Acetate.albumApiBase() + '/lyrics/' + encodePathSegment(stem), { credentials: 'same-origin' })
             .then(function (r) {
                 if (!r.ok) throw new Error('not found');
                 return r.json();

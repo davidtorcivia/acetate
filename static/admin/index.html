@@ -45,40 +45,51 @@
 
         <!-- Config Section -->
         <section id="section-config" class="section">
-            <h2>Configuration</h2>
+            <h2>Overview</h2>
             <div class="config-grid">
-                <div class="config-item">
-                    <label>Title</label>
-                    <span id="cfg-title"></span>
-                </div>
-                <div class="config-item">
-                    <label>Artist</label>
-                    <span id="cfg-artist"></span>
-                </div>
                 <div class="config-item">
                     <label>Admin User</label>
                     <span id="cfg-admin-user"></span>
                 </div>
                 <div class="config-item">
-                    <label>Listening Password</label>
-                    <span id="cfg-password"></span>
+                    <label>Albums</label>
+                    <span id="cfg-album-count"></span>
                 </div>
                 <div class="config-item">
-                    <label>Tracks</label>
-                    <span id="cfg-tracks"></span>
+                    <label>Passwords</label>
+                    <span id="cfg-password-count"></span>
                 </div>
             </div>
         </section>
 
-        <!-- Password Section -->
-        <section id="section-password" class="section">
-            <h2>Update Listening Password</h2>
-            <p class="section-copy">This controls listener access to the listening room gate.</p>
-            <form id="password-form" class="inline-form">
-                <input type="password" id="new-password" placeholder="New passphrase">
-                <button type="submit">Update</button>
+        <!-- Albums Section -->
+        <section id="section-albums" class="section">
+            <h2>Albums</h2>
+            <p class="section-copy">Manage albums. Select an album to edit tracks, cover art, and view analytics.</p>
+            <div id="albums-list"></div>
+            <h3>Create Album</h3>
+            <form id="album-create-form" class="inline-form">
+                <input type="text" id="new-album-title" placeholder="Title" autocomplete="off">
+                <input type="text" id="new-album-artist" placeholder="Artist" autocomplete="off">
+                <input type="text" id="new-album-path" placeholder="Album path (folder name)" autocomplete="off">
+                <button type="submit">Create Album</button>
             </form>
-            <div id="password-status" class="status hidden"></div>
+            <div id="albums-status" class="status hidden"></div>
+        </section>
+
+        <!-- Passwords Section -->
+        <section id="section-passwords" class="section">
+            <h2>Listening Passwords</h2>
+            <p class="section-copy">Manage listening passwords and link them to albums.</p>
+            <div id="passwords-list"></div>
+            <h3>Create Password</h3>
+            <form id="password-create-form" class="inline-form">
+                <input type="text" id="new-password-label" placeholder="Label" autocomplete="off">
+                <input type="password" id="new-password-passphrase" placeholder="Passphrase" autocomplete="new-password">
+                <button type="submit">Create Password</button>
+            </form>
+            <div id="password-album-checkboxes" class="checkbox-grid"></div>
+            <div id="passwords-status" class="status hidden"></div>
         </section>
 
         <!-- Admin Password Section -->
@@ -109,9 +120,9 @@
             <div id="admin-users-list"></div>
         </section>
 
-        <!-- Cover Section -->
-        <section id="section-cover" class="section">
-            <h2>Cover Art</h2>
+        <!-- Album Detail: Cover Art (only visible when album selected) -->
+        <section id="section-cover" class="section hidden">
+            <h2>Cover Art <span id="cover-album-label" class="section-album-label"></span></h2>
             <form id="cover-form" class="inline-form">
                 <input type="file" id="cover-file" accept="image/jpeg,image/png">
                 <button type="submit">Upload</button>
@@ -119,9 +130,9 @@
             <div id="cover-status" class="status hidden"></div>
         </section>
 
-        <!-- Tracks Section -->
-        <section id="section-tracks" class="section">
-            <h2>Track Order</h2>
+        <!-- Album Detail: Tracks (only visible when album selected) -->
+        <section id="section-tracks" class="section hidden">
+            <h2>Track Order <span id="tracks-album-label" class="section-album-label"></span></h2>
             <div class="track-meta-form">
                 <div class="field">
                     <label for="album-title">Album Title</label>
@@ -137,9 +148,9 @@
             <div id="tracks-status" class="status hidden"></div>
         </section>
 
-        <!-- Analytics Section -->
-        <section id="section-analytics" class="section">
-            <h2>Analytics</h2>
+        <!-- Album Detail: Analytics (only visible when album selected) -->
+        <section id="section-analytics" class="section hidden">
+            <h2>Analytics <span id="analytics-album-label" class="section-album-label"></span></h2>
             <div id="analytics-overview" class="analytics-overview"></div>
             <h3>Per-Track Stats</h3>
             <table id="track-stats-table" class="data-table">

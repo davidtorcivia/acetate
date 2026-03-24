@@ -7,13 +7,21 @@ import (
 	"net/url"
 	"strings"
 	"time"
+
+	"github.com/go-chi/chi/v5"
+
+	"acetate/internal/albums"
 )
 
 type contextKey string
 
-const adminUserIDKey contextKey = "admin_user_id"
+const (
+	adminUserIDKey   contextKey = "admin_user_id"
+	sessionPwIDKey   contextKey = "session_password_id"
+	requestAlbumKey  contextKey = "request_album"
+)
 
-// requireSession checks for a valid listener session cookie.
+// requireSession checks for a valid listener session cookie and stores password_id in context.
 func (s *Server) requireSession(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		cookie, err := r.Cookie("acetate_session")
@@ -22,7 +30,7 @@ func (s *Server) requireSession(next http.Handler) http.Handler {
 			return
 		}
 
-		valid, err := s.sessions.ValidateSession(cookie.Value)
+		valid, passwordID, err := s.sessions.ValidateSession(cookie.Value)
 		if err != nil {
 			log.Printf("session validate error: %v", err)
 			jsonError(w, "internal error", http.StatusInternalServerError)
@@ -43,7 +51,50 @@ func (s *Server) requireSession(next http.Handler) http.Handler {
 			return
 		}
 
-		next.ServeHTTP(w, r)
+		ctx := context.WithValue(r.Context(), sessionPwIDKey, passwordID)
+		next.ServeHTTP(w, r.WithContext(ctx))
+	})
+}
+
+// requireAlbumAccess resolves {slug} from the URL, verifies the session has access,
+// and stores the album in the request context.
+func (s *Server) requireAlbumAccess(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		slug := chi.URLParam(r, "slug")
+		if slug == "" {
+			jsonError(w, "bad request", http.StatusBadRequest)
+			return
+		}
+
+		alb, err := s.albumStore.GetAlbumBySlug(slug)
+		if err != nil {
+			log.Printf("album lookup error: %v", err)
+			jsonError(w, "internal error", http.StatusInternalServerError)
+			return
+		}
+		if alb == nil {
+			jsonError(w, "not found", http.StatusNotFound)
+			return
+		}
+
+		passwordID := passwordIDFromContext(r)
+		if passwordID <= 0 {
+			jsonError(w, "forbidden", http.StatusForbidden)
+			return
+		}
+		hasAccess, err := s.albumStore.PasswordHasAlbumAccess(passwordID, alb.ID)
+		if err != nil {
+			log.Printf("album access check error: %v", err)
+			jsonError(w, "internal error", http.StatusInternalServerError)
+			return
+		}
+		if !hasAccess {
+			jsonError(w, "forbidden", http.StatusForbidden)
+			return
+		}
+
+		ctx := context.WithValue(r.Context(), requestAlbumKey, alb)
+		next.ServeHTTP(w, r.WithContext(ctx))
 	})
 }
 
@@ -195,4 +246,16 @@ func adminUserIDFromContext(r *http.Request) (int64, bool) {
 		return 0, false
 	}
 	return id, true
+}
+
+func passwordIDFromContext(r *http.Request) int64 {
+	v := r.Context().Value(sessionPwIDKey)
+	id, _ := v.(int64)
+	return id
+}
+
+func albumFromContext(r *http.Request) *albums.Album {
+	v := r.Context().Value(requestAlbumKey)
+	a, _ := v.(*albums.Album)
+	return a
 }

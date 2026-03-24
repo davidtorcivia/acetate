@@ -60,6 +60,40 @@ CREATE TABLE IF NOT EXISTS admin_auth_audit (
     outcome TEXT NOT NULL,
     reason TEXT
 );
+
+CREATE TABLE IF NOT EXISTS albums (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    slug TEXT NOT NULL UNIQUE,
+    title TEXT NOT NULL,
+    artist TEXT NOT NULL DEFAULT '',
+    album_path TEXT NOT NULL,
+    created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS album_tracks (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    album_id INTEGER NOT NULL REFERENCES albums(id) ON DELETE CASCADE,
+    stem TEXT NOT NULL,
+    title TEXT NOT NULL,
+    display_index TEXT NOT NULL DEFAULT '',
+    sort_order INTEGER NOT NULL DEFAULT 0,
+    UNIQUE(album_id, stem)
+);
+
+CREATE TABLE IF NOT EXISTS listener_passwords (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    label TEXT NOT NULL DEFAULT '',
+    password_hash TEXT NOT NULL,
+    created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS password_album_access (
+    password_id INTEGER NOT NULL REFERENCES listener_passwords(id) ON DELETE CASCADE,
+    album_id INTEGER NOT NULL REFERENCES albums(id) ON DELETE CASCADE,
+    PRIMARY KEY (password_id, album_id)
+);
 `
 
 // Migrate applies the database schema.
@@ -86,6 +120,18 @@ func Migrate(db *sql.DB) error {
 	if err := ensureColumnExists(db, "admin_users", "require_password_reset", "INTEGER NOT NULL DEFAULT 0"); err != nil {
 		return err
 	}
+
+	// Multi-album columns on existing tables
+	if err := ensureColumnExists(db, "sessions", "password_id", "INTEGER"); err != nil {
+		return err
+	}
+	if err := ensureColumnExists(db, "events", "album_id", "INTEGER"); err != nil {
+		return err
+	}
+	if err := ensureColumnExists(db, "analytics_rollups_daily", "album_id", "INTEGER"); err != nil {
+		return err
+	}
+
 	if err := ensureIndexes(db); err != nil {
 		return err
 	}
@@ -106,6 +152,14 @@ func ensureIndexes(db *sql.DB) error {
 		"CREATE INDEX IF NOT EXISTS idx_rollups_day ON analytics_rollups_daily(day)",
 		"CREATE INDEX IF NOT EXISTS idx_rollups_track ON analytics_rollups_daily(track_stem)",
 		"CREATE INDEX IF NOT EXISTS idx_admin_auth_audit_occurred ON admin_auth_audit(occurred_at)",
+		// Multi-album indexes
+		"CREATE INDEX IF NOT EXISTS idx_albums_slug ON albums(slug)",
+		"CREATE INDEX IF NOT EXISTS idx_album_tracks_album ON album_tracks(album_id)",
+		"CREATE INDEX IF NOT EXISTS idx_album_tracks_album_sort ON album_tracks(album_id, sort_order)",
+		"CREATE INDEX IF NOT EXISTS idx_password_album_access_password ON password_album_access(password_id)",
+		"CREATE INDEX IF NOT EXISTS idx_password_album_access_album ON password_album_access(album_id)",
+		"CREATE INDEX IF NOT EXISTS idx_sessions_password ON sessions(password_id)",
+		"CREATE INDEX IF NOT EXISTS idx_events_album ON events(album_id)",
 	}
 
 	for _, stmt := range stmts {

@@ -8,6 +8,8 @@
     var currentAdminUser = '';
     var heatmapTooltipEl = null;
     var heatmapTooltipTarget = null;
+    var selectedAlbumId = null;
+    var albumsCache = [];
 
     function init() {
         loginPanel = document.getElementById('admin-login');
@@ -23,12 +25,13 @@
         loginForm.addEventListener('submit', handleLogin);
         setupForm.addEventListener('submit', handleSetup);
         document.getElementById('btn-logout').addEventListener('click', handleLogout);
-        document.getElementById('password-form').addEventListener('submit', handlePasswordUpdate);
         document.getElementById('admin-password-form').addEventListener('submit', handleAdminPasswordUpdate);
         document.getElementById('admin-user-create-form').addEventListener('submit', handleCreateAdminUser);
         document.getElementById('cover-form').addEventListener('submit', handleCoverUpload);
         document.getElementById('btn-save-tracks').addEventListener('click', handleSaveTracks);
         document.getElementById('admin-users-list').addEventListener('click', handleAdminUserAction);
+        document.getElementById('album-create-form').addEventListener('submit', handleCreateAlbum);
+        document.getElementById('password-create-form').addEventListener('submit', handleCreatePassword);
 
         setupHeatmapTooltip();
         checkSetupStatus();
@@ -169,25 +172,28 @@
         setupPanel.classList.add('hidden');
         loginPanel.classList.add('hidden');
         dashboard.classList.remove('hidden');
+        selectedAlbumId = null;
+        hideAlbumDetailSections();
         if (passwordResetRequired) {
             setPasswordResetMode(true);
         }
         loadConfig().then(function (needsReset) {
             if (!needsReset) {
-                loadTracks().then(function () {
-                    loadAdminUsers();
-                    loadAnalytics();
-                });
+                loadAlbums();
+                loadPasswords();
+                loadAdminUsers();
             } else {
                 clearAnalyticsTables();
                 document.getElementById('track-list').innerHTML = '';
                 document.getElementById('admin-users-list').innerHTML = '';
+                document.getElementById('albums-list').innerHTML = '';
+                document.getElementById('passwords-list').innerHTML = '';
             }
         });
     }
 
     function setPasswordResetMode(enabled) {
-        var gatedSections = ['section-password', 'section-cover', 'section-tracks', 'section-analytics', 'section-admin-users'];
+        var gatedSections = ['section-albums', 'section-passwords', 'section-cover', 'section-tracks', 'section-analytics', 'section-admin-users'];
         gatedSections.forEach(function (id) {
             var el = document.getElementById(id);
             if (!el) return;
@@ -196,6 +202,20 @@
         if (passwordResetBanner) {
             passwordResetBanner.classList.toggle('hidden', !enabled);
         }
+    }
+
+    function hideAlbumDetailSections() {
+        ['section-cover', 'section-tracks', 'section-analytics'].forEach(function (id) {
+            var el = document.getElementById(id);
+            if (el) el.classList.add('hidden');
+        });
+    }
+
+    function showAlbumDetailSections() {
+        ['section-cover', 'section-tracks', 'section-analytics'].forEach(function (id) {
+            var el = document.getElementById(id);
+            if (el) el.classList.remove('hidden');
+        });
     }
 
     function clearAnalyticsTables() {
@@ -338,14 +358,10 @@
                 return r.json();
             })
             .then(function (data) {
-                document.getElementById('cfg-title').textContent = data.title || '(not set)';
-                document.getElementById('cfg-artist').textContent = data.artist || '(not set)';
                 currentAdminUser = data.admin_user || '';
                 document.getElementById('cfg-admin-user').textContent = currentAdminUser || '(unknown)';
-                document.getElementById('cfg-password').textContent = data.password_set
-                    ? (data.password || '(empty)')
-                    : 'Not set';
-                document.getElementById('cfg-tracks').textContent = data.track_count + ' tracks';
+                document.getElementById('cfg-album-count').textContent = (data.album_count || 0) + ' albums';
+                document.getElementById('cfg-password-count').textContent = (data.password_count || 0) + ' passwords';
                 var needsReset = !!data.password_reset_required;
                 setPasswordResetMode(needsReset);
                 return needsReset;
@@ -356,36 +372,394 @@
             });
     }
 
-    // --- Password ---
-    function handlePasswordUpdate(e) {
+    // --- Albums ---
+    function loadAlbums() {
+        var list = document.getElementById('albums-list');
+        var status = document.getElementById('albums-status');
+
+        list.innerHTML = '<div class="empty-state">Loading albums...</div>';
+
+        return fetch('/admin/api/albums', { credentials: 'same-origin' })
+            .then(function (r) {
+                if (!r.ok) {
+                    return parseErrorResponse(r).then(function (msg) {
+                        throw new Error(msg || 'Failed to load albums');
+                    });
+                }
+                return r.json();
+            })
+            .then(function (payload) {
+                albumsCache = payload && payload.albums ? payload.albums : [];
+                renderAlbumsList(albumsCache);
+                setStatus(status, '', 'success');
+                // Re-render password album checkboxes whenever albums change
+                updatePasswordAlbumCheckboxes();
+            })
+            .catch(function (err) {
+                albumsCache = [];
+                list.innerHTML = '<div class="empty-state">Unable to load albums.</div>';
+                setStatus(status, err.message || 'Unable to load albums', 'error');
+            });
+    }
+
+    function renderAlbumsList(albums) {
+        var list = document.getElementById('albums-list');
+        if (!albums || !albums.length) {
+            list.innerHTML = '<div class="empty-state">No albums found. Create one below.</div>';
+            return;
+        }
+
+        var rows = albums.map(function (a) {
+            var isSelected = selectedAlbumId === a.id;
+            return '' +
+                '<div class="track-item' + (isSelected ? ' dragging' : '') + '" data-album-id="' + Number(a.id) + '">' +
+                '<span class="track-stem" style="min-width:auto">' + escapeHtml(a.title || '(untitled)') + '</span>' +
+                '<span style="color:var(--muted);font-size:0.82rem">' + escapeHtml(a.artist || '') + '</span>' +
+                '<span style="color:var(--soft);font-size:0.78rem;margin-left:auto">' + Number(a.track_count || 0) + ' tracks</span>' +
+                '<button type="button" class="btn-small album-select-btn" data-album-id="' + Number(a.id) + '">' + (isSelected ? 'Selected' : 'Select') + '</button>' +
+                '<button type="button" class="btn-small album-delete-btn" data-album-id="' + Number(a.id) + '" data-album-title="' + escapeAttr(a.title || '') + '">Delete</button>' +
+                '</div>';
+        }).join('');
+
+        list.innerHTML = rows;
+
+        // Bind click events
+        list.querySelectorAll('.album-select-btn').forEach(function (btn) {
+            btn.addEventListener('click', function () {
+                var albumId = Number(btn.getAttribute('data-album-id'));
+                selectAlbum(albumId);
+            });
+        });
+        list.querySelectorAll('.album-delete-btn').forEach(function (btn) {
+            btn.addEventListener('click', function () {
+                var albumId = Number(btn.getAttribute('data-album-id'));
+                var albumTitle = btn.getAttribute('data-album-title') || 'this album';
+                handleDeleteAlbum(albumId, albumTitle);
+            });
+        });
+    }
+
+    function selectAlbum(albumId) {
+        selectedAlbumId = albumId;
+        var album = findAlbumById(albumId);
+        var label = album ? (album.title || 'Album #' + albumId) : 'Album #' + albumId;
+
+        // Update album-label spans
+        var labelSpan = document.getElementById('cover-album-label');
+        if (labelSpan) labelSpan.textContent = '- ' + label;
+        labelSpan = document.getElementById('tracks-album-label');
+        if (labelSpan) labelSpan.textContent = '- ' + label;
+        labelSpan = document.getElementById('analytics-album-label');
+        if (labelSpan) labelSpan.textContent = '- ' + label;
+
+        showAlbumDetailSections();
+        renderAlbumsList(albumsCache);
+        loadTracks(albumId);
+        loadAnalytics(albumId);
+    }
+
+    function findAlbumById(id) {
+        for (var i = 0; i < albumsCache.length; i++) {
+            if (albumsCache[i].id === id) return albumsCache[i];
+        }
+        return null;
+    }
+
+    function handleCreateAlbum(e) {
         e.preventDefault();
-        var pass = document.getElementById('new-password').value;
-        var status = document.getElementById('password-status');
+        var titleEl = document.getElementById('new-album-title');
+        var artistEl = document.getElementById('new-album-artist');
+        var pathEl = document.getElementById('new-album-path');
+        var status = document.getElementById('albums-status');
+        var submitBtn = e.target.querySelector('button[type="submit"]');
 
-        if (!pass) return;
+        var title = titleEl.value.trim();
+        var artist = artistEl.value.trim();
+        var albumPath = pathEl.value.trim();
 
-        fetch('/admin/api/password', {
-            method: 'PUT',
+        if (!title || !albumPath) {
+            setStatus(status, 'Title and album path are required', 'error');
+            return;
+        }
+
+        submitBtn.disabled = true;
+
+        fetch('/admin/api/albums', {
+            method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             credentials: 'same-origin',
-            body: JSON.stringify({ passphrase: pass })
+            body: JSON.stringify({ title: title, artist: artist, album_path: albumPath })
         })
             .then(function (r) {
                 if (r.ok) {
-                    setStatus(status, 'Listening password updated', 'success');
-                    document.getElementById('new-password').value = '';
+                    return r.json().then(function () {
+                        titleEl.value = '';
+                        artistEl.value = '';
+                        pathEl.value = '';
+                        setStatus(status, 'Album created', 'success');
+                        loadAlbums();
+                        loadConfig();
+                    });
+                }
+                return parseErrorResponse(r).then(function (msg) {
+                    throw new Error(msg || 'Failed to create album');
+                });
+            })
+            .catch(function (err) {
+                setStatus(status, err.message || 'Failed to create album', 'error');
+            })
+            .finally(function () {
+                submitBtn.disabled = false;
+            });
+    }
+
+    function handleDeleteAlbum(albumId, albumTitle) {
+        if (!confirm('Delete album "' + albumTitle + '"? This cannot be undone.')) return;
+        var status = document.getElementById('albums-status');
+
+        fetch('/admin/api/albums/' + encodeURIComponent(String(albumId)), {
+            method: 'DELETE',
+            credentials: 'same-origin'
+        })
+            .then(function (r) {
+                if (r.ok) {
+                    setStatus(status, 'Album deleted', 'success');
+                    if (selectedAlbumId === albumId) {
+                        selectedAlbumId = null;
+                        hideAlbumDetailSections();
+                    }
+                    loadAlbums();
                     loadConfig();
                     return;
                 }
                 return parseErrorResponse(r).then(function (msg) {
-                    setStatus(status, msg || 'Failed to update listening password', 'error');
+                    setStatus(status, msg || 'Failed to delete album', 'error');
                 });
             })
             .catch(function () {
-                setStatus(status, 'Failed to update listening password', 'error');
+                setStatus(status, 'Failed to delete album', 'error');
             });
     }
 
+    // --- Passwords ---
+    function loadPasswords() {
+        var list = document.getElementById('passwords-list');
+        var status = document.getElementById('passwords-status');
+
+        list.innerHTML = '<div class="empty-state">Loading passwords...</div>';
+
+        return fetch('/admin/api/passwords', { credentials: 'same-origin' })
+            .then(function (r) {
+                if (!r.ok) {
+                    return parseErrorResponse(r).then(function (msg) {
+                        throw new Error(msg || 'Failed to load passwords');
+                    });
+                }
+                return r.json();
+            })
+            .then(function (payload) {
+                var passwords = payload && payload.passwords ? payload.passwords : [];
+                renderPasswordsList(passwords);
+                setStatus(status, '', 'success');
+            })
+            .catch(function (err) {
+                list.innerHTML = '<div class="empty-state">Unable to load passwords.</div>';
+                setStatus(status, err.message || 'Unable to load passwords', 'error');
+            });
+    }
+
+    function renderPasswordsList(passwords) {
+        var list = document.getElementById('passwords-list');
+        if (!passwords || !passwords.length) {
+            list.innerHTML = '<div class="empty-state">No listening passwords. Create one below.</div>';
+            return;
+        }
+
+        var rows = passwords.map(function (p) {
+            var albumCheckboxes = albumsCache.map(function (a) {
+                var checked = p.album_ids && p.album_ids.indexOf(a.id) !== -1;
+                return '<label class="checkbox-label" style="margin:2px 4px 2px 0">' +
+                    '<input type="checkbox" class="pw-album-cb" data-album-id="' + Number(a.id) + '"' + (checked ? ' checked' : '') + '>' +
+                    escapeHtml(a.title || 'Album #' + a.id) +
+                    '</label>';
+            }).join('');
+
+            return '' +
+                '<div class="track-item" style="flex-wrap:wrap" data-password-id="' + Number(p.id) + '">' +
+                '<input type="text" class="pw-label-input" value="' + escapeAttr(p.label || '') + '" placeholder="Label" style="min-width:120px">' +
+                '<input type="password" class="pw-passphrase-input" value="" placeholder="New passphrase (leave blank to keep)" style="min-width:140px">' +
+                '<div style="display:flex;flex-wrap:wrap;align-items:center;gap:2px;width:100%">' +
+                '<span style="color:var(--soft);font-size:0.78rem;margin-right:6px">Albums:</span>' +
+                albumCheckboxes +
+                '</div>' +
+                '<button type="button" class="btn-small pw-save-btn" data-password-id="' + Number(p.id) + '">Save</button>' +
+                '<button type="button" class="btn-small pw-delete-btn" data-password-id="' + Number(p.id) + '" data-password-label="' + escapeAttr(p.label || '') + '">Delete</button>' +
+                '</div>';
+        }).join('');
+
+        list.innerHTML = rows;
+
+        // Bind events
+        list.querySelectorAll('.pw-save-btn').forEach(function (btn) {
+            btn.addEventListener('click', function () {
+                var pwId = Number(btn.getAttribute('data-password-id'));
+                handleUpdatePassword(pwId, btn);
+            });
+        });
+        list.querySelectorAll('.pw-delete-btn').forEach(function (btn) {
+            btn.addEventListener('click', function () {
+                var pwId = Number(btn.getAttribute('data-password-id'));
+                var label = btn.getAttribute('data-password-label') || 'this password';
+                handleDeletePassword(pwId, label);
+            });
+        });
+    }
+
+    function updatePasswordAlbumCheckboxes() {
+        var container = document.getElementById('password-album-checkboxes');
+        if (!container) return;
+
+        if (!albumsCache.length) {
+            container.innerHTML = '<span style="color:var(--soft);font-size:0.78rem">No albums yet - create an album first</span>';
+            return;
+        }
+
+        container.innerHTML = '<span style="color:var(--soft);font-size:0.78rem;margin-right:6px">Link to albums:</span>' +
+            albumsCache.map(function (a) {
+                return '<label class="checkbox-label" style="margin:2px 4px 2px 0">' +
+                    '<input type="checkbox" class="new-pw-album-cb" data-album-id="' + Number(a.id) + '">' +
+                    escapeHtml(a.title || 'Album #' + a.id) +
+                    '</label>';
+            }).join('');
+    }
+
+    function handleCreatePassword(e) {
+        e.preventDefault();
+        var labelEl = document.getElementById('new-password-label');
+        var passphraseEl = document.getElementById('new-password-passphrase');
+        var status = document.getElementById('passwords-status');
+        var submitBtn = e.target.querySelector('button[type="submit"]');
+
+        var label = labelEl.value.trim();
+        var passphrase = passphraseEl.value;
+
+        if (!label || !passphrase) {
+            setStatus(status, 'Label and passphrase are required', 'error');
+            return;
+        }
+
+        var albumIds = [];
+        document.querySelectorAll('.new-pw-album-cb:checked').forEach(function (cb) {
+            albumIds.push(Number(cb.getAttribute('data-album-id')));
+        });
+
+        submitBtn.disabled = true;
+
+        fetch('/admin/api/passwords', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            credentials: 'same-origin',
+            body: JSON.stringify({ label: label, passphrase: passphrase, album_ids: albumIds })
+        })
+            .then(function (r) {
+                if (r.ok) {
+                    return r.json().then(function () {
+                        labelEl.value = '';
+                        passphraseEl.value = '';
+                        document.querySelectorAll('.new-pw-album-cb').forEach(function (cb) { cb.checked = false; });
+                        setStatus(status, 'Password created', 'success');
+                        loadPasswords();
+                        loadConfig();
+                    });
+                }
+                return parseErrorResponse(r).then(function (msg) {
+                    throw new Error(msg || 'Failed to create password');
+                });
+            })
+            .catch(function (err) {
+                setStatus(status, err.message || 'Failed to create password', 'error');
+            })
+            .finally(function () {
+                submitBtn.disabled = false;
+            });
+    }
+
+    function handleUpdatePassword(pwId, btn) {
+        var row = btn.closest('[data-password-id]');
+        if (!row) return;
+
+        var status = document.getElementById('passwords-status');
+        var labelInput = row.querySelector('.pw-label-input');
+        var passphraseInput = row.querySelector('.pw-passphrase-input');
+        var label = labelInput ? labelInput.value.trim() : '';
+        var passphrase = passphraseInput ? passphraseInput.value : '';
+
+        if (!label) {
+            setStatus(status, 'Label is required', 'error');
+            return;
+        }
+
+        var albumIds = [];
+        row.querySelectorAll('.pw-album-cb:checked').forEach(function (cb) {
+            albumIds.push(Number(cb.getAttribute('data-album-id')));
+        });
+
+        var body = { label: label, album_ids: albumIds };
+        if (passphrase) {
+            body.passphrase = passphrase;
+        }
+
+        btn.disabled = true;
+
+        fetch('/admin/api/passwords/' + encodeURIComponent(String(pwId)), {
+            method: 'PUT',
+            headers: { 'Content-Type': 'application/json' },
+            credentials: 'same-origin',
+            body: JSON.stringify(body)
+        })
+            .then(function (r) {
+                if (r.ok) {
+                    setStatus(status, 'Password updated', 'success');
+                    loadPasswords();
+                    return;
+                }
+                return parseErrorResponse(r).then(function (msg) {
+                    throw new Error(msg || 'Failed to update password');
+                });
+            })
+            .catch(function (err) {
+                setStatus(status, err.message || 'Failed to update password', 'error');
+            })
+            .finally(function () {
+                btn.disabled = false;
+            });
+    }
+
+    function handleDeletePassword(pwId, label) {
+        if (!confirm('Delete password "' + label + '"? This cannot be undone.')) return;
+        var status = document.getElementById('passwords-status');
+
+        fetch('/admin/api/passwords/' + encodeURIComponent(String(pwId)), {
+            method: 'DELETE',
+            credentials: 'same-origin'
+        })
+            .then(function (r) {
+                if (r.ok) {
+                    setStatus(status, 'Password deleted', 'success');
+                    loadPasswords();
+                    loadConfig();
+                    return;
+                }
+                return parseErrorResponse(r).then(function (msg) {
+                    setStatus(status, msg || 'Failed to delete password', 'error');
+                });
+            })
+            .catch(function () {
+                setStatus(status, 'Failed to delete password', 'error');
+            });
+    }
+
+    // --- Admin Password ---
     function handleAdminPasswordUpdate(e) {
         e.preventDefault();
         var currentPass = document.getElementById('current-admin-password').value;
@@ -645,12 +1019,17 @@
         var fileInput = document.getElementById('cover-file');
         var status = document.getElementById('cover-status');
 
+        if (!selectedAlbumId) {
+            setStatus(status, 'No album selected', 'error');
+            return;
+        }
+
         if (!fileInput.files.length) return;
 
         var formData = new FormData();
         formData.append('cover', fileInput.files[0]);
 
-        fetch('/admin/api/cover', {
+        fetch('/admin/api/albums/' + encodeURIComponent(String(selectedAlbumId)) + '/cover', {
             method: 'POST',
             credentials: 'same-origin',
             body: formData
@@ -673,9 +1052,11 @@
     // --- Tracks ---
     var currentTracks = [];
 
-    function loadTracks() {
+    function loadTracks(albumId) {
         trackMetaByStem = {};
-        return fetch('/admin/api/tracks', { credentials: 'same-origin' })
+        if (!albumId) return Promise.resolve();
+
+        return fetch('/admin/api/albums/' + encodeURIComponent(String(albumId)) + '/tracks', { credentials: 'same-origin' })
             .then(function (r) {
                 if (!r.ok) {
                     throw new Error('tracks');
@@ -691,17 +1072,17 @@
                     };
                 });
                 renderTrackList(tracks);
-                // Also load title/artist into form.
-                return fetch('/admin/api/config', { credentials: 'same-origin' })
+                // Load album title/artist into the track meta form
+                return fetch('/admin/api/albums/' + encodeURIComponent(String(albumId)), { credentials: 'same-origin' })
                     .then(function (r) {
                         if (!r.ok) {
-                            throw new Error('config');
+                            throw new Error('album');
                         }
                         return r.json();
                     })
-                    .then(function (cfg) {
-                        document.getElementById('album-title').value = cfg.title || '';
-                        document.getElementById('album-artist').value = cfg.artist || '';
+                    .then(function (album) {
+                        document.getElementById('album-title').value = album.title || '';
+                        document.getElementById('album-artist').value = album.artist || '';
                     });
             });
     }
@@ -772,6 +1153,12 @@
 
     function handleSaveTracks() {
         var status = document.getElementById('tracks-status');
+
+        if (!selectedAlbumId) {
+            setStatus(status, 'No album selected', 'error');
+            return;
+        }
+
         var items = document.querySelectorAll('.track-item');
 
         var tracks = [];
@@ -785,7 +1172,7 @@
             });
         });
 
-        fetch('/admin/api/tracks', {
+        fetch('/admin/api/albums/' + encodeURIComponent(String(selectedAlbumId)) + '/tracks', {
             method: 'PUT',
             headers: { 'Content-Type': 'application/json' },
             credentials: 'same-origin',
@@ -798,6 +1185,7 @@
             .then(function (r) {
                 if (r.ok) {
                     setStatus(status, 'Saved', 'success');
+                    loadAlbums();
                     loadConfig();
                     return;
                 }
@@ -811,8 +1199,10 @@
     }
 
     // --- Analytics ---
-    function loadAnalytics() {
-        fetch('/admin/api/analytics', { credentials: 'same-origin' })
+    function loadAnalytics(albumId) {
+        if (!albumId) return;
+
+        fetch('/admin/api/albums/' + encodeURIComponent(String(albumId)) + '/analytics', { credentials: 'same-origin' })
             .then(function (r) {
                 if (!r.ok) {
                     throw new Error('analytics');

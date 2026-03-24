@@ -13,22 +13,21 @@ import (
 	"sync"
 	"time"
 
+	"acetate/internal/albums"
 	"acetate/internal/analytics"
 	"acetate/internal/auth"
-	"acetate/internal/config"
 )
 
 // Server is the main HTTP server.
 type Server struct {
 	httpServer             *http.Server
 	db                     *sql.DB
-	config                 *config.Manager
+	albumStore             *albums.Store
 	sessions               *auth.SessionStore
 	rateLimiter            *auth.RateLimiter
 	adminLoginGuard        *adminLoginGuard
 	cfIPs                  *auth.CloudflareIPs
 	collector              *analytics.Collector
-	albumPath              string
 	dataPath               string
 	analyticsRetentionDays int
 	maintenanceInterval    time.Duration
@@ -41,12 +40,11 @@ type Server struct {
 // Config holds server configuration.
 type Config struct {
 	ListenAddr             string
-	AlbumPath              string
 	DataPath               string
 	AnalyticsRetentionDays int
 	MaintenanceInterval    time.Duration
 	DB                     *sql.DB
-	ConfigMgr              *config.Manager
+	AlbumStore             *albums.Store
 }
 
 // New creates a new Server with all dependencies wired.
@@ -58,13 +56,12 @@ func New(cfg Config) *Server {
 
 	s := &Server{
 		db:                     cfg.DB,
-		config:                 cfg.ConfigMgr,
+		albumStore:             cfg.AlbumStore,
 		sessions:               sessions,
 		rateLimiter:            rateLimiter,
 		adminLoginGuard:        newAdminLoginGuard(),
 		cfIPs:                  cfIPs,
 		collector:              collector,
-		albumPath:              cfg.AlbumPath,
 		dataPath:               cfg.DataPath,
 		analyticsRetentionDays: cfg.AnalyticsRetentionDays,
 		maintenanceInterval:    cfg.MaintenanceInterval,

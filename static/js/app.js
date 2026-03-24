@@ -3,11 +3,12 @@
     'use strict';
 
     window.Acetate = {
-        state: 'gate', // 'gate' or 'player'
+        state: 'gate', // 'gate', 'selector', or 'player'
+        albums: null,       // list of accessible albums from auth response
+        currentAlbum: null, // {slug, title, artist}
         albumData: null,
         currentTrackIndex: -1,
         offlineMode: false,
-        offlineAlbumKey: 'acetate-offline-album-v1',
         playbackStateKey: 'acetate-playback-v1',
         pendingDeepLinkSearch: '',
 
@@ -22,53 +23,97 @@
 
             // Handle back button
             window.addEventListener('popstate', function () {
-                if (Acetate.state === 'player') {
+                if (Acetate.state === 'player' && Acetate.albums && Acetate.albums.length > 1) {
+                    Acetate.showAlbumSelector();
+                } else if (Acetate.state === 'player' || Acetate.state === 'selector') {
                     Acetate.showGate();
                 }
             });
         },
 
+        // Returns the album-scoped API base, e.g. "/api/albums/my-album"
+        albumApiBase: function () {
+            if (!this.currentAlbum) return '/api/albums/_';
+            return '/api/albums/' + this.encodePathSegment(this.currentAlbum.slug);
+        },
+
+        offlineAlbumKey: function () {
+            var slug = this.currentAlbum ? this.currentAlbum.slug : 'default';
+            return 'acetate-offline-album-' + slug;
+        },
+
         checkSession: function () {
             fetch('/api/session', { credentials: 'same-origin' })
                 .then(function (r) {
-                    if (r.ok) {
-                        Acetate.onAuthenticated();
+                    if (r.ok) return r.json();
+                    throw new Error('unauthorized');
+                })
+                .then(function (data) {
+                    if (data.albums && data.albums.length > 0) {
+                        Acetate.onAuthenticated(data);
                     } else {
-                        Acetate.notifyServiceWorker('UNAUTHENTICATED');
                         Acetate.showGate();
                     }
                 })
                 .catch(function () {
-                    var offlineData = Acetate.readOfflineAlbumSnapshot();
-                    if (offlineData) {
-                        Acetate.onAuthenticated(offlineData, true);
-                        return;
-                    }
                     Acetate.notifyServiceWorker('UNAUTHENTICATED');
                     Acetate.showGate();
                 });
         },
 
-        onAuthenticated: function (prefetchedData, isOffline) {
-            // Push history state for back button protection
+        onAuthenticated: function (authData) {
+            this.notifyServiceWorker('AUTHENTICATED');
+
+            if (authData && authData.albums) {
+                this.albums = authData.albums;
+            }
+
+            if (!this.albums || this.albums.length === 0) {
+                // No albums accessible — shouldn't happen but handle gracefully
+                this.showGate();
+                return;
+            }
+
+            if (this.albums.length === 1) {
+                this.selectAlbum(this.albums[0]);
+            } else {
+                this.showAlbumSelector();
+            }
+        },
+
+        selectAlbum: function (album) {
+            this.currentAlbum = album;
+            this.offlineMode = false;
+            document.body.classList.remove('offline-mode');
+
             var nextSearch = window.location.search;
             if (this.pendingDeepLinkSearch && nextSearch !== this.pendingDeepLinkSearch) {
                 nextSearch = this.pendingDeepLinkSearch;
             }
             history.pushState({ screen: 'player' }, '', window.location.pathname + nextSearch + window.location.hash);
-            this.notifyServiceWorker('AUTHENTICATED');
-            this.offlineMode = !!isOffline;
-            document.body.classList.toggle('offline-mode', this.offlineMode);
 
-            if (prefetchedData) {
-                this.onAlbumDataLoaded(prefetchedData, true);
-                return;
-            }
             this.loadAlbumData();
         },
 
+        showAlbumSelector: function () {
+            this.state = 'selector';
+            this.currentAlbum = null;
+            if (typeof AcetatePlayer !== 'undefined' && AcetatePlayer.isPlaying && AcetatePlayer.isPlaying()) {
+                AcetatePlayer.pause();
+            }
+            history.pushState({ screen: 'selector' }, '', window.location.pathname);
+            document.getElementById('gate').classList.remove('active');
+            document.getElementById('player').classList.remove('active');
+            document.getElementById('selector').classList.add('active');
+
+            if (typeof AcetateSelector !== 'undefined') {
+                AcetateSelector.render(this.albums);
+            }
+        },
+
         loadAlbumData: function () {
-            fetch('/api/tracks', { credentials: 'same-origin' })
+            var base = this.albumApiBase();
+            fetch(base + '/tracks', { credentials: 'same-origin' })
                 .then(function (r) {
                     if (!r.ok) {
                         if (r.status === 401 || r.status === 403) {
@@ -129,12 +174,15 @@
         showGate: function () {
             this.state = 'gate';
             this.offlineMode = false;
+            this.currentAlbum = null;
+            this.albums = null;
             document.body.classList.remove('offline-mode');
             if (typeof AcetatePlayer !== 'undefined' && AcetatePlayer.isPlaying && AcetatePlayer.isPlaying()) {
                 AcetatePlayer.pause();
             }
             document.getElementById('gate').classList.add('active');
             document.getElementById('player').classList.remove('active');
+            document.getElementById('selector').classList.remove('active');
             var input = document.getElementById('passphrase');
             input.value = '';
             setTimeout(function () { input.focus(); }, 100);
@@ -143,12 +191,13 @@
         showPlayer: function () {
             this.state = 'player';
             document.getElementById('gate').classList.remove('active');
+            document.getElementById('selector').classList.remove('active');
             document.getElementById('player').classList.add('active');
 
             // Load cover
             var cover = document.getElementById('cover');
             cover.classList.remove('hidden', 'fallback');
-            cover.src = '/api/cover';
+            cover.src = this.albumApiBase() + '/cover';
             cover.onerror = function () {
                 this.onerror = null;
                 this.classList.add('fallback');
@@ -162,8 +211,10 @@
 
             if (this.pendingDeepLinkSearch) {
                 var deepLink = this.parseDeepLinkTarget(tracks, this.pendingDeepLinkSearch);
-                this.pendingDeepLinkSearch = '';
-                if (deepLink) return deepLink;
+                if (deepLink) {
+                    this.pendingDeepLinkSearch = '';
+                    return deepLink;
+                }
             }
 
             var playbackState = this.readPlaybackState();
@@ -209,8 +260,8 @@
 
             if (/^\d+$/.test(value)) {
                 var n = parseInt(value, 10);
-                if (n >= 1 && n <= tracks.length) return n - 1; // 1-based
-                if (n >= 0 && n < tracks.length) return n; // 0-based
+                if (n >= 1 && n <= tracks.length) return n - 1;
+                if (n >= 0 && n < tracks.length) return n;
             }
 
             var lowered = value.toLowerCase();
@@ -280,7 +331,7 @@
 
         storeOfflineAlbumSnapshot: function (data) {
             try {
-                localStorage.setItem(this.offlineAlbumKey, JSON.stringify({
+                localStorage.setItem(this.offlineAlbumKey(), JSON.stringify({
                     saved_at: Date.now(),
                     album: data
                 }));
@@ -291,7 +342,7 @@
 
         readOfflineAlbumSnapshot: function () {
             try {
-                var raw = localStorage.getItem(this.offlineAlbumKey);
+                var raw = localStorage.getItem(this.offlineAlbumKey());
                 if (!raw) return null;
                 var parsed = JSON.parse(raw);
                 if (!parsed || !parsed.album || !parsed.album.tracks || !parsed.album.tracks.length) {
@@ -305,11 +356,12 @@
 
         warmOfflineCaches: function (albumData) {
             if (!albumData || !albumData.tracks) return;
+            var base = this.albumApiBase();
 
-            fetch('/api/cover', { credentials: 'same-origin' }).catch(function () { });
+            fetch(base + '/cover', { credentials: 'same-origin' }).catch(function () { });
 
             albumData.tracks.forEach(function (track) {
-                fetch('/api/lyrics/' + Acetate.encodePathSegment(track.stem), { credentials: 'same-origin' }).catch(function () { });
+                fetch(base + '/lyrics/' + Acetate.encodePathSegment(track.stem), { credentials: 'same-origin' }).catch(function () { });
             });
         },
 
@@ -327,8 +379,8 @@
             return search || '';
         },
 
-        makeCoverFallback: function () {
-            var title = (this.albumData && this.albumData.title) ? this.albumData.title : 'Acetate';
+        makeCoverFallback: function (overrideTitle) {
+            var title = overrideTitle || ((this.albumData && this.albumData.title) ? this.albumData.title : 'Acetate');
             title = String(title).replace(/[<>&]/g, '').slice(0, 28);
             var svg =
                 "<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 300 300'>" +

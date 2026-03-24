@@ -39,7 +39,10 @@
             .then(function (r) {
                 input.disabled = false;
                 if (r.ok) {
-                    Acetate.onAuthenticated();
+                    r.json().then(function (data) {
+                        Acetate.onAuthenticated(data);
+                    });
+                    return;
                 } else if (r.status === 401) {
                     // Wrong passphrase — shake
                     input.value = '';

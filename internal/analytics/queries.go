@@ -46,6 +46,7 @@ type QueryFilter struct {
 	To         *time.Time
 	Stems      []string
 	EventTypes []string
+	AlbumID    *int64
 }
 
 // GetTrackStats returns per-track analytics.
@@ -65,6 +66,7 @@ func GetTrackStatsFiltered(db *sql.DB, filter QueryFilter) ([]TrackStats, error)
 	args := make([]interface{}, 0, 8)
 	appendTimeFilter(&where, &args, "e.created_at", filter)
 	appendStemFilter(&where, &args, "e.track_stem", filter.Stems)
+	appendAlbumFilter(&where, &args, "e.album_id", filter.AlbumID)
 
 	query := `
 		SELECT
@@ -138,6 +140,7 @@ func GetDropoutHeatmapFiltered(db *sql.DB, stem string, filter QueryFilter) ([]D
 	args := []interface{}{stem}
 	appendEventTypeFilter(&where, &args, "event_type", eventTypes)
 	appendTimeFilter(&where, &args, "created_at", filter)
+	appendAlbumFilter(&where, &args, "album_id", filter.AlbumID)
 
 	query := `
 		SELECT position_seconds
@@ -197,6 +200,7 @@ func GetSessionTimelineFiltered(db *sql.DB, limit int, filter QueryFilter) ([]Se
 	joinArgs := make([]interface{}, 0, 8)
 	appendTimeFilter(&joinClauses, &joinArgs, "e.created_at", filter)
 	appendStemFilter(&joinClauses, &joinArgs, "e.track_stem", filter.Stems)
+	appendAlbumFilter(&joinClauses, &joinArgs, "e.album_id", filter.AlbumID)
 
 	where := []string{"1=1"}
 	args := make([]interface{}, 0, 8)
@@ -269,6 +273,7 @@ func GetOverallStatsFiltered(db *sql.DB, filter QueryFilter) (*OverallStats, err
 	appendTimeFilter(&eventWhere, &eventArgs, "created_at", filter)
 	appendStemFilter(&eventWhere, &eventArgs, "track_stem", filter.Stems)
 	appendEventTypeFilter(&eventWhere, &eventArgs, "event_type", filter.EventTypes)
+	appendAlbumFilter(&eventWhere, &eventArgs, "album_id", filter.AlbumID)
 
 	// Average tracks per session.
 	avgQuery := `
@@ -382,6 +387,14 @@ func appendEventTypeFilter(where *[]string, args *[]interface{}, column string, 
 	for _, et := range eventTypes {
 		*args = append(*args, et)
 	}
+}
+
+func appendAlbumFilter(where *[]string, args *[]interface{}, column string, albumID *int64) {
+	if albumID == nil {
+		return
+	}
+	*where = append(*where, column+" = ?")
+	*args = append(*args, *albumID)
 }
 
 func placeholders(n int) string {

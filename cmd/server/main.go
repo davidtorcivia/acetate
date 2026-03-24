@@ -11,7 +11,7 @@ import (
 	"syscall"
 	"time"
 
-	"acetate/internal/config"
+	"acetate/internal/albums"
 	"acetate/internal/database"
 	"acetate/internal/server"
 )
@@ -32,11 +32,6 @@ func main() {
 		log.Println("WARNING: ADMIN_TOKEN is deprecated and ignored; use ADMIN_USERNAME + ADMIN_PASSWORD_HASH")
 	}
 
-	// Validate album path exists
-	if _, err := os.Stat(albumPath); os.IsNotExist(err) {
-		log.Fatalf("album path does not exist: %s", albumPath)
-	}
-
 	// Open database
 	db, err := database.Open(dataPath)
 	if err != nil {
@@ -53,27 +48,32 @@ func main() {
 		}
 	}
 
-	// Load or generate config
-	cfgMgr, err := config.NewManager(dataPath, albumPath)
-	if err != nil {
-		log.Fatalf("load config: %v", err)
+	// Migrate legacy config.json into database if needed
+	if err := albums.MigrateFromConfigJSON(db, dataPath, albumPath); err != nil {
+		log.Fatalf("migrate config: %v", err)
 	}
 
-	cfg := cfgMgr.Get()
-	if cfg.Password == "" {
-		log.Println("WARNING: no password set — listeners cannot authenticate until one is configured")
+	// Create album store
+	albumStore := albums.NewStore(db)
+
+	allAlbums, err := albumStore.ListAlbums()
+	if err != nil {
+		log.Fatalf("list albums: %v", err)
 	}
-	log.Printf("loaded %d tracks", len(cfg.Tracks))
+	log.Printf("loaded %d album(s)", len(allAlbums))
+	for _, a := range allAlbums {
+		tracks, _ := albumStore.GetTracks(a.ID)
+		log.Printf("  album %q (%s) — %d tracks", a.Title, a.Slug, len(tracks))
+	}
 
 	// Create and start server
 	srv := server.New(server.Config{
 		ListenAddr:             listenAddr,
-		AlbumPath:              albumPath,
 		DataPath:               dataPath,
 		AnalyticsRetentionDays: analyticsRetentionDays,
 		MaintenanceInterval:    maintenanceInterval,
 		DB:                     db,
-		ConfigMgr:              cfgMgr,
+		AlbumStore:             albumStore,
 	})
 
 	// Graceful shutdown

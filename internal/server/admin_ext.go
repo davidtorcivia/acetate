@@ -20,6 +20,7 @@ import (
 	"strings"
 	"time"
 
+	"acetate/internal/albums"
 	"acetate/internal/analytics"
 	"acetate/internal/config"
 )
@@ -158,18 +159,33 @@ func formatFilterTime(t *time.Time) string {
 }
 
 func (s *Server) handleAdminReconcilePreview(w http.ResponseWriter, r *http.Request) {
-	cfg := s.config.Get()
-	albumTracks, err := config.ScanAlbumTracks(s.albumPath)
+	alb := s.adminAlbumFromRequest(w, r)
+	if alb == nil {
+		return
+	}
+
+	dbTracks, err := s.albumStore.GetTracks(alb.ID)
+	if err != nil {
+		jsonError(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+	diskTracks, err := config.ScanAlbumTracks(alb.AlbumPath)
 	if err != nil {
 		jsonError(w, "internal error", http.StatusInternalServerError)
 		return
 	}
 
-	report := buildReconcileReport(cfg.Tracks, albumTracks)
+	configTracks := albumTracksToConfigTracks(dbTracks)
+	report := buildReconcileReport(configTracks, diskTracks)
 	jsonOK(w, report)
 }
 
 func (s *Server) handleAdminReconcileApply(w http.ResponseWriter, r *http.Request) {
+	alb := s.adminAlbumFromRequest(w, r)
+	if alb == nil {
+		return
+	}
+
 	var req struct {
 		AdoptMetadataTitles bool `json:"adopt_metadata_titles"`
 		KeepMissing         bool `json:"keep_missing"`
@@ -179,26 +195,50 @@ func (s *Server) handleAdminReconcileApply(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
-	cfg := s.config.Get()
-	albumTracks, err := config.ScanAlbumTracks(s.albumPath)
+	dbTracks, err := s.albumStore.GetTracks(alb.ID)
+	if err != nil {
+		jsonError(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+	diskTracks, err := config.ScanAlbumTracks(alb.AlbumPath)
 	if err != nil {
 		jsonError(w, "internal error", http.StatusInternalServerError)
 		return
 	}
 
-	updatedTracks, applied := applyReconcile(cfg.Tracks, albumTracks, req.AdoptMetadataTitles, req.KeepMissing)
-	cfg.Tracks = updatedTracks
-	if err := s.config.Update(cfg); err != nil {
+	configTracks := albumTracksToConfigTracks(dbTracks)
+	updatedConfigTracks, applied := applyReconcile(configTracks, diskTracks, req.AdoptMetadataTitles, req.KeepMissing)
+
+	// Convert back to albums.Track and save
+	newTracks := make([]albums.Track, len(updatedConfigTracks))
+	for i, ct := range updatedConfigTracks {
+		newTracks[i] = albums.Track{
+			Stem:         ct.Stem,
+			Title:        ct.Title,
+			DisplayIndex: ct.DisplayIndex,
+			SortOrder:    i,
+		}
+	}
+	if err := s.albumStore.SetTracks(alb.ID, newTracks); err != nil {
 		jsonError(w, "internal error", http.StatusInternalServerError)
 		return
 	}
 
-	report := buildReconcileReport(cfg.Tracks, albumTracks)
+	report := buildReconcileReport(updatedConfigTracks, diskTracks)
 	jsonOK(w, map[string]interface{}{
 		"status":  "ok",
 		"applied": applied,
 		"report":  report,
 	})
+}
+
+// albumTracksToConfigTracks converts albums.Track to config.Track for reconciliation.
+func albumTracksToConfigTracks(tracks []albums.Track) []config.Track {
+	out := make([]config.Track, len(tracks))
+	for i, t := range tracks {
+		out[i] = config.Track{Stem: t.Stem, Title: t.Title, DisplayIndex: t.DisplayIndex}
+	}
+	return out
 }
 
 func buildReconcileReport(configTracks, albumTracks []config.Track) reconcileReport {
@@ -298,11 +338,12 @@ func (s *Server) handleAdminOpsHealth(w http.ResponseWriter, r *http.Request) {
 		status = "degraded"
 	}
 
-	albumErr := checkPathExists(s.albumPath)
 	dataErr := checkPathExists(s.dataPath)
-	if albumErr != nil || dataErr != nil {
+	if dataErr != nil {
 		status = "degraded"
 	}
+
+	albumCount, _ := s.albumStore.AlbumCount()
 
 	jsonOK(w, map[string]interface{}{
 		"status":                    status,
@@ -310,6 +351,7 @@ func (s *Server) handleAdminOpsHealth(w http.ResponseWriter, r *http.Request) {
 		"uptime_seconds":            int(time.Since(s.startedAt).Seconds()),
 		"analytics_retention_days":  s.analyticsRetentionDays,
 		"maintenance_interval_secs": int(s.maintenanceInterval.Seconds()),
+		"album_count":               albumCount,
 		"analytics": map[string]interface{}{
 			"dropped_events":  s.collector.DroppedCount(),
 			"rejected_events": s.collector.RejectedCount(),
@@ -319,10 +361,8 @@ func (s *Server) handleAdminOpsHealth(w http.ResponseWriter, r *http.Request) {
 			"error": errorString(dbErr),
 		},
 		"paths": map[string]interface{}{
-			"album_ok":  albumErr == nil,
-			"album_err": errorString(albumErr),
-			"data_ok":   dataErr == nil,
-			"data_err":  errorString(dataErr),
+			"data_ok":  dataErr == nil,
+			"data_err": errorString(dataErr),
 		},
 	})
 }

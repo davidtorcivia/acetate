@@ -34,6 +34,7 @@ type Event struct {
 	TrackStem       string  `json:"track_stem,omitempty"`
 	PositionSeconds float64 `json:"position_seconds,omitempty"`
 	Metadata        string  `json:"metadata,omitempty"`
+	AlbumID         int64   `json:"album_id,omitempty"`
 }
 
 // highValueEvents are worth brief backpressure when the channel is full.
@@ -211,7 +212,7 @@ func (c *Collector) flush(batch []Event) {
 	}
 
 	stmt, err := tx.Prepare(
-		"INSERT INTO events (session_id, event_type, track_stem, position_seconds, metadata) VALUES (?, ?, ?, ?, ?)",
+		"INSERT INTO events (session_id, event_type, track_stem, position_seconds, metadata, album_id) VALUES (?, ?, ?, ?, ?, ?)",
 	)
 	if err != nil {
 		log.Printf("analytics: prepare: %v", err)
@@ -225,7 +226,11 @@ func (c *Collector) flush(batch []Event) {
 		if metadata == "" {
 			metadata = "{}"
 		}
-		_, err := stmt.Exec(e.SessionID, e.EventType, e.TrackStem, e.PositionSeconds, metadata)
+		var albumID interface{}
+		if e.AlbumID > 0 {
+			albumID = e.AlbumID
+		}
+		_, err := stmt.Exec(e.SessionID, e.EventType, e.TrackStem, e.PositionSeconds, metadata, albumID)
 		if err != nil {
 			log.Printf("analytics: insert event: %v", err)
 		}
@@ -237,7 +242,7 @@ func (c *Collector) flush(batch []Event) {
 }
 
 // RecordBatch parses and records a batch of events from JSON.
-func (c *Collector) RecordBatch(sessionID string, data []byte) error {
+func (c *Collector) RecordBatch(sessionID string, data []byte, albumID int64) error {
 	if !validSessionID(sessionID) {
 		return errors.New("invalid session")
 	}
@@ -264,6 +269,7 @@ func (c *Collector) RecordBatch(sessionID string, data []byte) error {
 			continue
 		}
 		normalized.SessionID = sessionID
+		normalized.AlbumID = albumID
 		c.Record(normalized)
 	}
 

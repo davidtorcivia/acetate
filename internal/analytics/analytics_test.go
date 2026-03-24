@@ -133,7 +133,7 @@ func TestRecordBatch(t *testing.T) {
 		{"event_type": "pause", "track_stem": "01-gathering", "position_seconds": 30.5}
 	]`)
 
-	if err := c.RecordBatch(testSessionID, data); err != nil {
+	if err := c.RecordBatch(testSessionID, data, 0); err != nil {
 		t.Fatalf("RecordBatch: %v", err)
 	}
 
@@ -192,7 +192,7 @@ func TestRecordBatchRejectsOversizedBatch(t *testing.T) {
 	}
 	data, _ := json.Marshal(events)
 
-	if err := c.RecordBatch(testSessionID, data); err == nil {
+	if err := c.RecordBatch(testSessionID, data, 0); err == nil {
 		t.Fatal("expected oversized batch error")
 	}
 }
@@ -212,7 +212,7 @@ func TestRecordBatchSkipsInvalidEvents(t *testing.T) {
 		{"event_type":"bogus","track_stem":"01-gathering"},
 		{"event_type":"pause","track_stem":"../../etc/passwd"}
 	]`)
-	if err := c.RecordBatch(testSessionID, data); err != nil {
+	if err := c.RecordBatch(testSessionID, data, 0); err != nil {
 		t.Fatalf("RecordBatch: %v", err)
 	}
 	c.Close()
@@ -230,7 +230,7 @@ func TestRecordBatchRejectsInvalidSessionID(t *testing.T) {
 	c := testCollector(t)
 
 	data := []byte(`[{"event_type":"play","track_stem":"01-gathering"}]`)
-	if err := c.RecordBatch("invalid-session", data); err == nil {
+	if err := c.RecordBatch("invalid-session", data, 0); err == nil {
 		t.Fatal("expected invalid session error")
 	}
 }

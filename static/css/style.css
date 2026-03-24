@@ -98,6 +98,75 @@ body::after {
     visibility: visible;
 }
 
+/* === Album Selector === */
+.selector-inner {
+    width: 100%;
+    max-width: 720px;
+    padding: 0 24px;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 24px;
+}
+
+.selector-prompt {
+    text-align: center;
+    font-family: var(--sans);
+    font-size: 0.78rem;
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+    color: rgba(212, 207, 196, 0.72);
+    user-select: none;
+}
+
+.album-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
+    gap: 24px;
+    width: 100%;
+}
+
+.album-card {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 8px;
+    cursor: pointer;
+    padding: 12px;
+    border-radius: 8px;
+    transition: background 0.2s ease, transform 0.15s ease;
+    outline: none;
+}
+
+.album-card:hover,
+.album-card:focus-visible {
+    background: rgba(255, 255, 255, 0.04);
+    transform: scale(1.03);
+}
+
+.album-card-cover {
+    width: 100%;
+    aspect-ratio: 1;
+    object-fit: cover;
+    border-radius: 4px;
+    background: rgba(255, 255, 255, 0.02);
+}
+
+.album-card-title {
+    font-family: var(--serif);
+    font-size: 1rem;
+    color: var(--text);
+    text-align: center;
+    line-height: 1.3;
+}
+
+.album-card-artist {
+    font-family: var(--sans);
+    font-size: 0.75rem;
+    color: rgba(212, 207, 196, 0.55);
+    text-align: center;
+}
+
 /* === Gate === */
 .gate-inner {
     width: 100%;
