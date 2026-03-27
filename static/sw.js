@@ -1,7 +1,7 @@
 // Acetate — Service Worker
-const CACHE_NAME = 'acetate-static-v14';
-const API_CACHE = 'acetate-api-v14';
-const AUDIO_CACHE = 'acetate-audio-v14';
+const CACHE_NAME = 'acetate-static-v16';
+const API_CACHE = 'acetate-api-v16';
+const AUDIO_CACHE = 'acetate-audio-v16';
 const MAX_AUDIO_CACHE_ENTRIES = 24;
 let listenerAuthenticated = false;
 
@@ -15,6 +15,7 @@ const STATIC_ASSETS = [
     '/js/tracklist.js',
     '/js/oscilloscope.js',
     '/js/lyrics.js',
+    '/js/selector.js',
     '/js/analytics.js',
     '/manifest.json'
 ];

@@ -205,6 +205,10 @@ func GetSessionTimelineFiltered(db *sql.DB, limit int, filter QueryFilter) ([]Se
 	where := []string{"1=1"}
 	args := make([]interface{}, 0, 8)
 	appendTimeFilter(&where, &args, "s.started_at", filter)
+	if filter.AlbumID != nil {
+		where = append(where, "s.id IN (SELECT DISTINCT session_id FROM events WHERE album_id = ?)")
+		args = append(args, *filter.AlbumID)
+	}
 
 	queryArgs := make([]interface{}, 0, len(joinArgs)+len(args)+1)
 	queryArgs = append(queryArgs, joinArgs...)
@@ -259,10 +263,14 @@ func GetOverallStatsFiltered(db *sql.DB, filter QueryFilter) (*OverallStats, err
 	filter = normalizeFilter(filter)
 	stats := &OverallStats{}
 
-	// Total sessions (session start time-based filter).
+	// Total sessions (session start time-based filter, scoped to album if set).
 	whereSessions := []string{"1=1"}
 	argsSessions := make([]interface{}, 0, 4)
 	appendTimeFilter(&whereSessions, &argsSessions, "started_at", filter)
+	if filter.AlbumID != nil {
+		whereSessions = append(whereSessions, "id IN (SELECT DISTINCT session_id FROM events WHERE album_id = ?)")
+		argsSessions = append(argsSessions, *filter.AlbumID)
+	}
 	if err := db.QueryRow("SELECT COUNT(*) FROM sessions WHERE "+strings.Join(whereSessions, " AND "), argsSessions...).Scan(&stats.TotalSessions); err != nil {
 		return nil, fmt.Errorf("query total sessions: %w", err)
 	}

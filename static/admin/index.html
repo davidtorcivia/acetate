@@ -71,7 +71,7 @@
             <form id="album-create-form" class="inline-form">
                 <input type="text" id="new-album-title" placeholder="Title" autocomplete="off">
                 <input type="text" id="new-album-artist" placeholder="Artist" autocomplete="off">
-                <input type="text" id="new-album-path" placeholder="Album path (folder name)" autocomplete="off">
+                <select id="new-album-path"><option value="">Select album folder…</option></select>
                 <button type="submit">Create Album</button>
             </form>
             <div id="albums-status" class="status hidden"></div>
@@ -142,6 +142,10 @@
                     <label for="album-artist">Artist</label>
                     <input type="text" id="album-artist">
                 </div>
+            </div>
+            <div id="reconcile-bar" class="reconcile-bar hidden">
+                <span id="reconcile-summary"></span>
+                <button id="btn-reconcile-apply" class="btn-primary">Import Tracks from Disk</button>
             </div>
             <div id="track-list" class="track-list"></div>
             <button id="btn-save-tracks" class="btn-primary">Save Track Order</button>

@@ -199,6 +199,7 @@ body::after {
     outline: none;
     text-align: center;
     letter-spacing: 0.03em;
+    -webkit-text-security: disc;
     transition: border-color 0.25s ease, box-shadow 0.25s ease, background 0.25s ease;
 }
 

@@ -3,6 +3,8 @@ package server
 import (
 	"log"
 	"net/http"
+	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 
@@ -67,6 +69,11 @@ func (s *Server) handleAdminCreateAlbum(w http.ResponseWriter, r *http.Request) 
 	if title == "" || albumPath == "" {
 		jsonError(w, "title and album_path are required", http.StatusBadRequest)
 		return
+	}
+
+	// Resolve relative folder names against the album base path
+	if s.albumBasePath != "" && !filepath.IsAbs(albumPath) {
+		albumPath = filepath.Join(s.albumBasePath, albumPath)
 	}
 
 	alb, err := s.albumStore.CreateAlbum(title, artist, albumPath)
@@ -256,4 +263,27 @@ func (s *Server) handleAdminDeletePassword(w http.ResponseWriter, r *http.Reques
 	}
 
 	jsonOK(w, map[string]string{"status": "ok"})
+}
+
+func (s *Server) handleAdminListAlbumFolders(w http.ResponseWriter, r *http.Request) {
+	if s.albumBasePath == "" {
+		jsonOK(w, map[string]interface{}{"folders": []string{}})
+		return
+	}
+
+	entries, err := os.ReadDir(s.albumBasePath)
+	if err != nil {
+		log.Printf("list album folders error: %v", err)
+		jsonError(w, "cannot read album directory", http.StatusInternalServerError)
+		return
+	}
+
+	folders := make([]string, 0)
+	for _, e := range entries {
+		if e.IsDir() {
+			folders = append(folders, e.Name())
+		}
+	}
+
+	jsonOK(w, map[string]interface{}{"folders": folders})
 }

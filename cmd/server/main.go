@@ -70,6 +70,7 @@ func main() {
 	srv := server.New(server.Config{
 		ListenAddr:             listenAddr,
 		DataPath:               dataPath,
+		AlbumBasePath:          albumPath,
 		AnalyticsRetentionDays: analyticsRetentionDays,
 		MaintenanceInterval:    maintenanceInterval,
 		DB:                     db,

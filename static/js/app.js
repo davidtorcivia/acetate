@@ -14,7 +14,10 @@
 
         init: function () {
             this.pendingDeepLinkSearch = this.extractDeepLinkSearch(window.location.search);
-            this.checkSession();
+
+            // Always clear any existing listener session so visitors must re-enter the passphrase
+            fetch('/api/auth', { method: 'DELETE', credentials: 'same-origin' }).catch(function () {});
+            this.showGate();
 
             // Register service worker
             if ('serviceWorker' in navigator) {

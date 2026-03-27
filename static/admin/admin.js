@@ -29,6 +29,7 @@
         document.getElementById('admin-user-create-form').addEventListener('submit', handleCreateAdminUser);
         document.getElementById('cover-form').addEventListener('submit', handleCoverUpload);
         document.getElementById('btn-save-tracks').addEventListener('click', handleSaveTracks);
+        document.getElementById('btn-reconcile-apply').addEventListener('click', handleReconcileApply);
         document.getElementById('admin-users-list').addEventListener('click', handleAdminUserAction);
         document.getElementById('album-create-form').addEventListener('submit', handleCreateAlbum);
         document.getElementById('password-create-form').addEventListener('submit', handleCreatePassword);
@@ -180,6 +181,7 @@
         loadConfig().then(function (needsReset) {
             if (!needsReset) {
                 loadAlbums();
+                loadAlbumFolders();
                 loadPasswords();
                 loadAdminUsers();
             } else {
@@ -373,6 +375,24 @@
     }
 
     // --- Albums ---
+    function loadAlbumFolders() {
+        var select = document.getElementById('new-album-path');
+        if (!select) return Promise.resolve();
+
+        return fetch('/admin/api/album-folders', { credentials: 'same-origin' })
+            .then(function (r) { return r.ok ? r.json() : { folders: [] }; })
+            .then(function (data) {
+                var folders = data && data.folders ? data.folders : [];
+                // Preserve the placeholder option, rebuild the rest
+                var html = '<option value="">Select album folder\u2026</option>';
+                folders.forEach(function (f) {
+                    html += '<option value="' + escapeAttr(f) + '">' + escapeHtml(f) + '</option>';
+                });
+                select.innerHTML = html;
+            })
+            .catch(function () {});
+    }
+
     function loadAlbums() {
         var list = document.getElementById('albums-list');
         var status = document.getElementById('albums-status');
@@ -495,9 +515,10 @@
                     return r.json().then(function () {
                         titleEl.value = '';
                         artistEl.value = '';
-                        pathEl.value = '';
+                        pathEl.selectedIndex = 0;
                         setStatus(status, 'Album created', 'success');
                         loadAlbums();
+                        loadAlbumFolders();
                         loadConfig();
                     });
                 }
@@ -1054,6 +1075,7 @@
 
     function loadTracks(albumId) {
         trackMetaByStem = {};
+        hideReconcileBar();
         if (!albumId) return Promise.resolve();
 
         return fetch('/admin/api/albums/' + encodeURIComponent(String(albumId)) + '/tracks', { credentials: 'same-origin' })
@@ -1084,6 +1106,78 @@
                         document.getElementById('album-title').value = album.title || '';
                         document.getElementById('album-artist').value = album.artist || '';
                     });
+            })
+            .then(function () {
+                return loadReconcilePreview(albumId);
+            });
+    }
+
+    function hideReconcileBar() {
+        var bar = document.getElementById('reconcile-bar');
+        if (bar) bar.classList.add('hidden');
+    }
+
+    function loadReconcilePreview(albumId) {
+        return fetch('/admin/api/albums/' + encodeURIComponent(String(albumId)) + '/reconcile', { credentials: 'same-origin' })
+            .then(function (r) { return r.ok ? r.json() : null; })
+            .then(function (report) {
+                if (!report) return;
+                var newCount = report.album_only ? report.album_only.length : 0;
+                var missingCount = report.config_only ? report.config_only.length : 0;
+                var mismatchCount = report.title_mismatches ? report.title_mismatches.length : 0;
+
+                if (newCount === 0 && missingCount === 0 && mismatchCount === 0) {
+                    hideReconcileBar();
+                    return;
+                }
+
+                var parts = [];
+                if (newCount > 0) parts.push(newCount + ' new track' + (newCount > 1 ? 's' : '') + ' found on disk');
+                if (missingCount > 0) parts.push(missingCount + ' track' + (missingCount > 1 ? 's' : '') + ' missing from disk');
+                if (mismatchCount > 0) parts.push(mismatchCount + ' title mismatch' + (mismatchCount > 1 ? 'es' : ''));
+
+                var bar = document.getElementById('reconcile-bar');
+                document.getElementById('reconcile-summary').textContent = parts.join(', ');
+                bar.classList.remove('hidden');
+            })
+            .catch(function () {});
+    }
+
+    function handleReconcileApply() {
+        if (!selectedAlbumId) return;
+        var status = document.getElementById('tracks-status');
+        var btn = document.getElementById('btn-reconcile-apply');
+        btn.disabled = true;
+
+        fetch('/admin/api/albums/' + encodeURIComponent(String(selectedAlbumId)) + '/reconcile', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            credentials: 'same-origin',
+            body: JSON.stringify({ adopt_metadata_titles: true, keep_missing: false })
+        })
+            .then(function (r) {
+                if (!r.ok) {
+                    return parseErrorResponse(r).then(function (msg) {
+                        throw new Error(msg || 'Reconcile failed');
+                    });
+                }
+                return r.json();
+            })
+            .then(function (data) {
+                var applied = data.applied || {};
+                var parts = [];
+                if (applied.added > 0) parts.push(applied.added + ' added');
+                if (applied.removed > 0) parts.push(applied.removed + ' removed');
+                if (applied.titles_updated > 0) parts.push(applied.titles_updated + ' titles updated');
+                setStatus(status, 'Tracks synced' + (parts.length ? ': ' + parts.join(', ') : ''), 'success');
+                loadTracks(selectedAlbumId);
+                loadAlbums();
+            })
+            .catch(function (err) {
+                setStatus(status, err.message || 'Reconcile failed', 'error');
+            })
+            .finally(function () {
+                btn.disabled = false;
             });
     }
 
@@ -1200,6 +1294,11 @@
 
     // --- Analytics ---
     function loadAnalytics(albumId) {
+        // Always clear stale data first
+        document.getElementById('analytics-overview').innerHTML = '';
+        document.getElementById('track-stats-body').innerHTML = '<tr><td colspan="6">Loading...</td></tr>';
+        document.getElementById('sessions-body').innerHTML = '<tr><td colspan="4">Loading...</td></tr>';
+
         if (!albumId) return;
 
         fetch('/admin/api/albums/' + encodeURIComponent(String(albumId)) + '/analytics', { credentials: 'same-origin' })
@@ -1214,12 +1313,19 @@
                 renderTrackStats(data.tracks, data.heatmaps);
                 renderSessions(data.sessions);
             })
-            .catch(function () { });
+            .catch(function () {
+                document.getElementById('analytics-overview').innerHTML = '';
+                document.getElementById('track-stats-body').innerHTML = '<tr><td colspan="6">No data yet</td></tr>';
+                document.getElementById('sessions-body').innerHTML = '<tr><td colspan="4">No sessions yet</td></tr>';
+            });
     }
 
     function renderOverview(overall) {
-        if (!overall) return;
         var container = document.getElementById('analytics-overview');
+        if (!overall) {
+            container.innerHTML = '';
+            return;
+        }
         container.innerHTML =
             '<div class="stat-card"><div class="stat-value">' + (overall.total_sessions || 0) + '</div><div class="stat-label">Sessions</div></div>' +
             '<div class="stat-card"><div class="stat-value">' + (overall.avg_tracks_per_session || 0).toFixed(1) + '</div><div class="stat-label">Avg Tracks/Session</div></div>' +

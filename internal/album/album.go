@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 	"time"
 
@@ -70,8 +71,17 @@ func detectLyricFormat(albumPath, stem string) string {
 	return ""
 }
 
-func ServeCover(w http.ResponseWriter, r *http.Request, albumPath, dataPath string) {
-	// Check for admin-uploaded override first.
+func ServeCover(w http.ResponseWriter, r *http.Request, albumPath, dataPath string, albumID ...int64) {
+	// Check for per-album admin-uploaded override first.
+	if len(albumID) > 0 && albumID[0] > 0 {
+		overridePath := filepath.Join(dataPath, "covers", strconv.FormatInt(albumID[0], 10), "cover_override.jpg")
+		if info, err := os.Stat(overridePath); err == nil {
+			serveCoverFile(w, r, overridePath, info)
+			return
+		}
+	}
+
+	// Legacy global override (for pre-migration albums).
 	overridePath := filepath.Join(dataPath, "cover_override.jpg")
 	if info, err := os.Stat(overridePath); err == nil {
 		serveCoverFile(w, r, overridePath, info)

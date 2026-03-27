@@ -82,6 +82,7 @@ func (s *Server) routes() http.Handler {
 			r.Get("/api/export/backup", s.handleAdminExportBackup)
 
 			// Album CRUD
+			r.Get("/api/album-folders", s.handleAdminListAlbumFolders)
 			r.Get("/api/albums", s.handleAdminListAlbums)
 			r.With(bodyLimiter(4096)).Post("/api/albums", s.handleAdminCreateAlbum)
 			r.Get("/api/albums/{id}", s.handleAdminGetAlbum)
@@ -283,7 +284,7 @@ func (s *Server) handleGetTracks(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleGetCover(w http.ResponseWriter, r *http.Request) {
 	alb := albumFromContext(r)
-	album.ServeCover(w, r, alb.AlbumPath, s.dataPath)
+	album.ServeCover(w, r, alb.AlbumPath, s.dataPath, alb.ID)
 }
 
 func (s *Server) handleStreamTrack(w http.ResponseWriter, r *http.Request) {
@@ -692,7 +693,13 @@ func (s *Server) handleAdminUploadCover(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	coverPath := filepath.Join(alb.AlbumPath, "cover_override.jpg")
+	coverDir := filepath.Join(s.dataPath, "covers", strconv.FormatInt(alb.ID, 10))
+	if err := os.MkdirAll(coverDir, 0755); err != nil {
+		log.Printf("create cover dir error: %v", err)
+		jsonError(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+	coverPath := filepath.Join(coverDir, "cover_override.jpg")
 	if err := os.WriteFile(coverPath, encoded.Bytes(), 0644); err != nil {
 		log.Printf("write cover error: %v", err)
 		jsonError(w, "internal error", http.StatusInternalServerError)

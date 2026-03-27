@@ -29,6 +29,7 @@ type Server struct {
 	cfIPs                  *auth.CloudflareIPs
 	collector              *analytics.Collector
 	dataPath               string
+	albumBasePath          string
 	analyticsRetentionDays int
 	maintenanceInterval    time.Duration
 	startedAt              time.Time
@@ -41,6 +42,7 @@ type Server struct {
 type Config struct {
 	ListenAddr             string
 	DataPath               string
+	AlbumBasePath          string
 	AnalyticsRetentionDays int
 	MaintenanceInterval    time.Duration
 	DB                     *sql.DB
@@ -63,6 +65,7 @@ func New(cfg Config) *Server {
 		cfIPs:                  cfIPs,
 		collector:              collector,
 		dataPath:               cfg.DataPath,
+		albumBasePath:          cfg.AlbumBasePath,
 		analyticsRetentionDays: cfg.AnalyticsRetentionDays,
 		maintenanceInterval:    cfg.MaintenanceInterval,
 		startedAt:              time.Now().UTC(),
