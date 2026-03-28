@@ -1253,7 +1253,7 @@
             return;
         }
 
-        var items = document.querySelectorAll('.track-item');
+        var items = document.getElementById('track-list').querySelectorAll('.track-item');
 
         var tracks = [];
         items.forEach(function (item, i) {

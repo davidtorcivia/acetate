@@ -363,6 +363,8 @@ func normalizeFilter(filter QueryFilter) QueryFilter {
 		out.EventTypes = append(out.EventTypes, et)
 	}
 
+	out.AlbumID = filter.AlbumID
+
 	return out
 }
 
