@@ -276,9 +276,10 @@ func (s *Server) handleGetTracks(w http.ResponseWriter, r *http.Request) {
 
 	trackInfos := album.GetTrackList(tracks, alb.AlbumPath)
 	jsonOK(w, map[string]interface{}{
-		"title":  alb.Title,
-		"artist": alb.Artist,
-		"tracks": trackInfos,
+		"title":              alb.Title,
+		"artist":             alb.Artist,
+		"tracks":             trackInfos,
+		"downloads_enabled":  alb.DownloadsEnabled,
 	})
 }
 
@@ -309,6 +310,19 @@ func (s *Server) handleStreamTrack(w http.ResponseWriter, r *http.Request) {
 	if !album.StemInTracks(stem, tracks) {
 		jsonError(w, "bad request", http.StatusBadRequest)
 		return
+	}
+
+	// Support ?dl=1 for download when downloads are enabled for this album.
+	if r.URL.Query().Get("dl") == "1" && alb.DownloadsEnabled {
+		// Find the track title for a friendly filename.
+		filename := stem + ".mp3"
+		for _, t := range tracks {
+			if t.Stem == stem && t.Title != "" {
+				filename = t.Title + ".mp3"
+				break
+			}
+		}
+		w.Header().Set("Content-Disposition", "attachment; filename=\""+strings.ReplaceAll(filename, "\"", "")+"\"")
 	}
 
 	album.StreamTrack(w, r, alb.AlbumPath, stem)

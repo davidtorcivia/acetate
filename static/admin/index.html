@@ -120,6 +120,21 @@
             <div id="admin-users-list"></div>
         </section>
 
+        <!-- Album Detail: Settings (only visible when album selected) -->
+        <section id="section-album-settings" class="section hidden">
+            <h2>Album Settings <span id="settings-album-label" class="section-album-label"></span></h2>
+            <div class="album-settings-grid">
+                <div class="album-setting-item">
+                    <label class="switch-label">
+                        <input type="checkbox" id="downloads-enabled-toggle">
+                        <span>Enable track downloads</span>
+                    </label>
+                    <p class="inline-note">Show a download button next to each track in the listener view.</p>
+                </div>
+            </div>
+            <div id="album-settings-status" class="status hidden"></div>
+        </section>
+
         <!-- Album Detail: Cover Art (only visible when album selected) -->
         <section id="section-cover" class="section hidden">
             <h2>Cover Art <span id="cover-album-label" class="section-album-label"></span></h2>

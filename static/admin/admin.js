@@ -34,8 +34,44 @@
         document.getElementById('album-create-form').addEventListener('submit', handleCreateAlbum);
         document.getElementById('password-create-form').addEventListener('submit', handleCreatePassword);
 
+        document.getElementById('downloads-enabled-toggle').addEventListener('change', handleDownloadsToggle);
+
         setupHeatmapTooltip();
         checkSetupStatus();
+    }
+
+    function handleDownloadsToggle() {
+        if (!selectedAlbumId) return;
+        var toggle = document.getElementById('downloads-enabled-toggle');
+        var status = document.getElementById('album-settings-status');
+        var enabled = toggle.checked;
+        toggle.disabled = true;
+
+        fetch('/admin/api/albums/' + encodeURIComponent(String(selectedAlbumId)), {
+            method: 'PUT',
+            headers: { 'Content-Type': 'application/json' },
+            credentials: 'same-origin',
+            body: JSON.stringify({ downloads_enabled: enabled })
+        })
+            .then(function (r) {
+                if (r.ok) {
+                    setStatus(status, 'Downloads ' + (enabled ? 'enabled' : 'disabled'), 'success');
+                    // Update cache
+                    var album = findAlbumById(selectedAlbumId);
+                    if (album) album.downloads_enabled = enabled;
+                    return;
+                }
+                return parseErrorResponse(r).then(function (msg) {
+                    throw new Error(msg || 'Failed to update setting');
+                });
+            })
+            .catch(function (err) {
+                toggle.checked = !enabled;
+                setStatus(status, err.message || 'Failed to update setting', 'error');
+            })
+            .finally(function () {
+                toggle.disabled = false;
+            });
     }
 
     function checkSetupStatus() {
@@ -195,7 +231,7 @@
     }
 
     function setPasswordResetMode(enabled) {
-        var gatedSections = ['section-albums', 'section-passwords', 'section-cover', 'section-tracks', 'section-analytics', 'section-admin-users'];
+        var gatedSections = ['section-albums', 'section-passwords', 'section-album-settings', 'section-cover', 'section-tracks', 'section-analytics', 'section-admin-users'];
         gatedSections.forEach(function (id) {
             var el = document.getElementById(id);
             if (!el) return;
@@ -207,14 +243,14 @@
     }
 
     function hideAlbumDetailSections() {
-        ['section-cover', 'section-tracks', 'section-analytics'].forEach(function (id) {
+        ['section-album-settings', 'section-cover', 'section-tracks', 'section-analytics'].forEach(function (id) {
             var el = document.getElementById(id);
             if (el) el.classList.add('hidden');
         });
     }
 
     function showAlbumDetailSections() {
-        ['section-cover', 'section-tracks', 'section-analytics'].forEach(function (id) {
+        ['section-album-settings', 'section-cover', 'section-tracks', 'section-analytics'].forEach(function (id) {
             var el = document.getElementById(id);
             if (el) el.classList.remove('hidden');
         });
@@ -465,12 +501,16 @@
         var label = album ? (album.title || 'Album #' + albumId) : 'Album #' + albumId;
 
         // Update album-label spans
-        var labelSpan = document.getElementById('cover-album-label');
-        if (labelSpan) labelSpan.textContent = '- ' + label;
-        labelSpan = document.getElementById('tracks-album-label');
-        if (labelSpan) labelSpan.textContent = '- ' + label;
-        labelSpan = document.getElementById('analytics-album-label');
-        if (labelSpan) labelSpan.textContent = '- ' + label;
+        ['cover-album-label', 'tracks-album-label', 'analytics-album-label', 'settings-album-label'].forEach(function (id) {
+            var el = document.getElementById(id);
+            if (el) el.textContent = '- ' + label;
+        });
+
+        // Load album settings
+        var downloadsToggle = document.getElementById('downloads-enabled-toggle');
+        if (downloadsToggle && album) {
+            downloadsToggle.checked = !!album.downloads_enabled;
+        }
 
         showAlbumDetailSections();
         renderAlbumsList(albumsCache);

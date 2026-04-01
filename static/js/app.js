@@ -159,6 +159,7 @@
             Acetate.showPlayer();
 
             if (typeof AcetateTracklist !== 'undefined') {
+                AcetateTracklist.setDownloadsEnabled(!!data.downloads_enabled);
                 AcetateTracklist.render(data.tracks);
             }
 

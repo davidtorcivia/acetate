@@ -3,10 +3,14 @@
     'use strict';
 
     var container, toggle, items;
+    var downloadsEnabled = false;
 
     window.AcetateTracklist = {
         render: render,
-        setActive: setActive
+        setActive: setActive,
+        setDownloadsEnabled: function (enabled) {
+            downloadsEnabled = !!enabled;
+        }
     };
 
     function init() {
@@ -27,6 +31,10 @@
         }
     }
 
+    function makeDownloadUrl(stem) {
+        return Acetate.albumApiBase() + '/stream/' + Acetate.encodePathSegment(stem) + '?dl=1';
+    }
+
     function render(tracks) {
         if (!items) return;
         items.innerHTML = '';
@@ -45,6 +53,21 @@
 
             li.appendChild(num);
             li.appendChild(title);
+
+            if (downloadsEnabled) {
+                var dl = document.createElement('a');
+                dl.className = 'track-dl';
+                dl.href = makeDownloadUrl(track.stem);
+                dl.setAttribute('aria-label', 'Download ' + track.title);
+                dl.setAttribute('title', 'Download');
+                dl.setAttribute('download', '');
+                dl.innerHTML = '<svg width="14" height="14" viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M7 1v8.5"/><path d="M3.5 6.5 7 10l3.5-3.5"/><path d="M2 12h10"/></svg>';
+                dl.addEventListener('click', function (e) {
+                    e.stopPropagation();
+                });
+                li.appendChild(dl);
+            }
+
             li.tabIndex = 0;
             li.setAttribute('role', 'button');
             li.setAttribute('aria-label', 'Play ' + track.title);

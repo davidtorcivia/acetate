@@ -12,13 +12,14 @@ import (
 
 // Album represents an album in the database.
 type Album struct {
-	ID        int64  `json:"id"`
-	Slug      string `json:"slug"`
-	Title     string `json:"title"`
-	Artist    string `json:"artist"`
-	AlbumPath string `json:"album_path"`
-	CreatedAt string `json:"created_at"`
-	UpdatedAt string `json:"updated_at"`
+	ID               int64  `json:"id"`
+	Slug             string `json:"slug"`
+	Title            string `json:"title"`
+	Artist           string `json:"artist"`
+	AlbumPath        string `json:"album_path"`
+	DownloadsEnabled bool   `json:"downloads_enabled"`
+	CreatedAt        string `json:"created_at"`
+	UpdatedAt        string `json:"updated_at"`
 }
 
 // Track represents a track within an album.
@@ -75,8 +76,8 @@ func (s *Store) CreateAlbum(title, artist, albumPath string) (*Album, error) {
 func (s *Store) GetAlbum(id int64) (*Album, error) {
 	a := &Album{}
 	err := s.db.QueryRow(
-		"SELECT id, slug, title, artist, album_path, created_at, updated_at FROM albums WHERE id = ?", id,
-	).Scan(&a.ID, &a.Slug, &a.Title, &a.Artist, &a.AlbumPath, &a.CreatedAt, &a.UpdatedAt)
+		"SELECT id, slug, title, artist, album_path, downloads_enabled, created_at, updated_at FROM albums WHERE id = ?", id,
+	).Scan(&a.ID, &a.Slug, &a.Title, &a.Artist, &a.AlbumPath, &a.DownloadsEnabled, &a.CreatedAt, &a.UpdatedAt)
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}
@@ -90,8 +91,8 @@ func (s *Store) GetAlbum(id int64) (*Album, error) {
 func (s *Store) GetAlbumBySlug(slug string) (*Album, error) {
 	a := &Album{}
 	err := s.db.QueryRow(
-		"SELECT id, slug, title, artist, album_path, created_at, updated_at FROM albums WHERE slug = ?", slug,
-	).Scan(&a.ID, &a.Slug, &a.Title, &a.Artist, &a.AlbumPath, &a.CreatedAt, &a.UpdatedAt)
+		"SELECT id, slug, title, artist, album_path, downloads_enabled, created_at, updated_at FROM albums WHERE slug = ?", slug,
+	).Scan(&a.ID, &a.Slug, &a.Title, &a.Artist, &a.AlbumPath, &a.DownloadsEnabled, &a.CreatedAt, &a.UpdatedAt)
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}
@@ -103,7 +104,7 @@ func (s *Store) GetAlbumBySlug(slug string) (*Album, error) {
 
 // ListAlbums returns all albums ordered by ID.
 func (s *Store) ListAlbums() ([]Album, error) {
-	rows, err := s.db.Query("SELECT id, slug, title, artist, album_path, created_at, updated_at FROM albums ORDER BY id")
+	rows, err := s.db.Query("SELECT id, slug, title, artist, album_path, downloads_enabled, created_at, updated_at FROM albums ORDER BY id")
 	if err != nil {
 		return nil, fmt.Errorf("list albums: %w", err)
 	}
@@ -112,7 +113,7 @@ func (s *Store) ListAlbums() ([]Album, error) {
 	var albums []Album
 	for rows.Next() {
 		var a Album
-		if err := rows.Scan(&a.ID, &a.Slug, &a.Title, &a.Artist, &a.AlbumPath, &a.CreatedAt, &a.UpdatedAt); err != nil {
+		if err := rows.Scan(&a.ID, &a.Slug, &a.Title, &a.Artist, &a.AlbumPath, &a.DownloadsEnabled, &a.CreatedAt, &a.UpdatedAt); err != nil {
 			return nil, err
 		}
 		albums = append(albums, a)
@@ -142,6 +143,20 @@ func (s *Store) UpdateAlbum(id int64, title, artist string) error {
 	_, err = s.db.Exec(
 		"UPDATE albums SET slug = ?, title = ?, artist = ?, updated_at = ? WHERE id = ?",
 		slug, title, artist, now, id,
+	)
+	return err
+}
+
+// SetDownloadsEnabled updates the downloads_enabled flag for an album.
+func (s *Store) SetDownloadsEnabled(id int64, enabled bool) error {
+	val := 0
+	if enabled {
+		val = 1
+	}
+	now := time.Now().UTC().Format(time.RFC3339)
+	_, err := s.db.Exec(
+		"UPDATE albums SET downloads_enabled = ?, updated_at = ? WHERE id = ?",
+		val, now, id,
 	)
 	return err
 }
@@ -425,7 +440,7 @@ func (s *Store) VerifyPassword(passphrase string) (int64, []int64, error) {
 // GetAlbumsForPassword returns the albums a password grants access to.
 func (s *Store) GetAlbumsForPassword(passwordID int64) ([]Album, error) {
 	rows, err := s.db.Query(
-		`SELECT a.id, a.slug, a.title, a.artist, a.album_path, a.created_at, a.updated_at
+		`SELECT a.id, a.slug, a.title, a.artist, a.album_path, a.downloads_enabled, a.created_at, a.updated_at
 		 FROM albums a
 		 INNER JOIN password_album_access pa ON pa.album_id = a.id
 		 WHERE pa.password_id = ?
@@ -439,7 +454,7 @@ func (s *Store) GetAlbumsForPassword(passwordID int64) ([]Album, error) {
 	var albums []Album
 	for rows.Next() {
 		var a Album
-		if err := rows.Scan(&a.ID, &a.Slug, &a.Title, &a.Artist, &a.AlbumPath, &a.CreatedAt, &a.UpdatedAt); err != nil {
+		if err := rows.Scan(&a.ID, &a.Slug, &a.Title, &a.Artist, &a.AlbumPath, &a.DownloadsEnabled, &a.CreatedAt, &a.UpdatedAt); err != nil {
 			return nil, err
 		}
 		albums = append(albums, a)

@@ -634,6 +634,42 @@ body::after {
     opacity: 1;
 }
 
+.tracklist li .track-title-text {
+    flex: 1;
+    min-width: 0;
+}
+
+.tracklist li .track-dl {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 28px;
+    height: 28px;
+    flex-shrink: 0;
+    margin-left: auto;
+    color: var(--text-dim);
+    opacity: 0.4;
+    border-radius: 6px;
+    transition: opacity 0.2s ease, color 0.2s ease, background 0.15s ease;
+    text-decoration: none;
+}
+
+.tracklist li:hover .track-dl,
+.tracklist li:focus-visible .track-dl,
+.tracklist li.active .track-dl {
+    opacity: 0.8;
+}
+
+.tracklist li .track-dl:hover {
+    opacity: 1;
+    color: var(--text);
+    background: rgba(255, 255, 255, 0.08);
+}
+
+.tracklist li .track-dl:active {
+    background: rgba(255, 255, 255, 0.12);
+}
+
 /* Scrollbar */
 .lyrics-container::-webkit-scrollbar {
     width: 0;
@@ -674,6 +710,10 @@ body::after {
 
     .tracklist li {
         padding: 12px 12px;
+    }
+
+    .tracklist li .track-dl {
+        opacity: 1;
     }
 
     .tracklist {

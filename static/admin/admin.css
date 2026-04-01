@@ -526,6 +526,22 @@ button:disabled {
     padding: 8px 2px 2px;
 }
 
+.album-settings-grid {
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+}
+
+.album-setting-item {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    padding: 10px 12px;
+    background: rgba(255, 255, 255, 0.025);
+    border: 1px solid rgba(212, 207, 196, 0.11);
+    border-radius: 10px;
+}
+
 .reconcile-bar {
     display: flex;
     align-items: center;

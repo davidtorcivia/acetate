@@ -121,6 +121,11 @@ func Migrate(db *sql.DB) error {
 		return err
 	}
 
+	// Album feature flags
+	if err := ensureColumnExists(db, "albums", "downloads_enabled", "INTEGER NOT NULL DEFAULT 0"); err != nil {
+		return err
+	}
+
 	// Multi-album columns on existing tables
 	if err := ensureColumnExists(db, "sessions", "password_id", "INTEGER"); err != nil {
 		return err

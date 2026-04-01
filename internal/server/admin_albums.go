@@ -22,14 +22,15 @@ func (s *Server) handleAdminListAlbums(w http.ResponseWriter, r *http.Request) {
 	}
 
 	type albumResp struct {
-		ID         int64  `json:"id"`
-		Slug       string `json:"slug"`
-		Title      string `json:"title"`
-		Artist     string `json:"artist"`
-		AlbumPath  string `json:"album_path"`
-		TrackCount int    `json:"track_count"`
-		CreatedAt  string `json:"created_at"`
-		UpdatedAt  string `json:"updated_at"`
+		ID               int64  `json:"id"`
+		Slug             string `json:"slug"`
+		Title            string `json:"title"`
+		Artist           string `json:"artist"`
+		AlbumPath        string `json:"album_path"`
+		DownloadsEnabled bool   `json:"downloads_enabled"`
+		TrackCount       int    `json:"track_count"`
+		CreatedAt        string `json:"created_at"`
+		UpdatedAt        string `json:"updated_at"`
 	}
 
 	trackCounts, _ := s.albumStore.GetAllTrackCounts()
@@ -37,14 +38,15 @@ func (s *Server) handleAdminListAlbums(w http.ResponseWriter, r *http.Request) {
 	resp := make([]albumResp, 0, len(allAlbums))
 	for _, a := range allAlbums {
 		resp = append(resp, albumResp{
-			ID:         a.ID,
-			Slug:       a.Slug,
-			Title:      a.Title,
-			Artist:     a.Artist,
-			AlbumPath:  a.AlbumPath,
-			TrackCount: trackCounts[a.ID],
-			CreatedAt:  a.CreatedAt,
-			UpdatedAt:  a.UpdatedAt,
+			ID:               a.ID,
+			Slug:             a.Slug,
+			Title:            a.Title,
+			Artist:           a.Artist,
+			AlbumPath:        a.AlbumPath,
+			DownloadsEnabled: a.DownloadsEnabled,
+			TrackCount:       trackCounts[a.ID],
+			CreatedAt:        a.CreatedAt,
+			UpdatedAt:        a.UpdatedAt,
 		})
 	}
 
@@ -101,8 +103,9 @@ func (s *Server) handleAdminUpdateAlbum(w http.ResponseWriter, r *http.Request) 
 	}
 
 	var req struct {
-		Title  string `json:"title"`
-		Artist string `json:"artist"`
+		Title            string `json:"title"`
+		Artist           string `json:"artist"`
+		DownloadsEnabled *bool  `json:"downloads_enabled"`
 	}
 	if err := decodeJSONBody(r, &req); err != nil {
 		jsonError(w, "bad request", http.StatusBadRequest)
@@ -122,6 +125,14 @@ func (s *Server) handleAdminUpdateAlbum(w http.ResponseWriter, r *http.Request) 
 		log.Printf("update album error: %v", err)
 		jsonError(w, "internal error", http.StatusInternalServerError)
 		return
+	}
+
+	if req.DownloadsEnabled != nil {
+		if err := s.albumStore.SetDownloadsEnabled(alb.ID, *req.DownloadsEnabled); err != nil {
+			log.Printf("update downloads_enabled error: %v", err)
+			jsonError(w, "internal error", http.StatusInternalServerError)
+			return
+		}
 	}
 
 	jsonOK(w, map[string]string{"status": "ok"})
