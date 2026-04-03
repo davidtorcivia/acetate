@@ -5,7 +5,6 @@
     var canvas, ctx;
     var audioCtx = null;
     var analyser = null;
-    var gainNode = null;
     var sourceA = null, sourceB = null;
     var dataArray = null;
     var currentSource = null;
@@ -18,8 +17,7 @@
         init: initAudio,
         draw: draw,
         setActiveDeck: setActiveDeck,
-        resumeContext: resumeContext,
-        setVolume: setVolume
+        resumeContext: resumeContext
     };
 
     function initCanvas() {
@@ -54,24 +52,25 @@
 
             dataArray = new Uint8Array(analyser.frequencyBinCount);
 
-            // Shared gain node for volume control (Safari ignores
-            // element.volume once routed through Web Audio).
-            gainNode = audioCtx.createGain();
-            gainNode.connect(audioCtx.destination);
+            // Use captureStream to tap audio for visualisation without
+            // rerouting output through Web Audio.  Keeps the native <audio>
+            // output path intact so iOS continues playback when the screen
+            // is off or the app is backgrounded.
+            var streamA = deckA.captureStream ? deckA.captureStream()
+                        : deckA.mozCaptureStream ? deckA.mozCaptureStream() : null;
+            var streamB = deckB.captureStream ? deckB.captureStream()
+                        : deckB.mozCaptureStream ? deckB.mozCaptureStream() : null;
 
-            // Create sources (once per element — cannot be recreated)
-            sourceA = audioCtx.createMediaElementSource(deckA);
-            sourceB = audioCtx.createMediaElementSource(deckB);
+            if (streamA) sourceA = audioCtx.createMediaStreamSource(streamA);
+            if (streamB) sourceB = audioCtx.createMediaStreamSource(streamB);
 
-            // Connect both through gain node to destination (speakers)
-            sourceA.connect(gainNode);
-            sourceB.connect(gainNode);
-
-            // Connect active source to analyser
-            sourceA.connect(analyser);
-            currentSource = sourceA;
+            // Connect active source to analyser (analysis only — no destination)
+            if (sourceA) {
+                sourceA.connect(analyser);
+                currentSource = sourceA;
+            }
         } catch (e) {
-            // Web Audio not available — oscilloscope will be flat
+            // Web Audio / captureStream not available — oscilloscope will be flat
         }
     }
 
@@ -92,12 +91,6 @@
     function resumeContext() {
         if (audioCtx && audioCtx.state === 'suspended') {
             audioCtx.resume();
-        }
-    }
-
-    function setVolume(value) {
-        if (gainNode) {
-            gainNode.gain.value = value;
         }
     }
 
