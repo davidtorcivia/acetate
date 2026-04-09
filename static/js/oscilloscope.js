@@ -85,17 +85,21 @@
     }
 
     function setActiveDeck(deck) {
-        if (!analyser || !sourceA || !sourceB) return;
+        if (!analyser) return;
 
         // Disconnect current from analyser
         if (currentSource) {
             try { currentSource.disconnect(analyser); } catch (e) { }
+            currentSource = null;
         }
 
-        // Connect the new active deck's source
+        // Connect the new active deck's source (may be null if captureStream
+        // was unavailable for that deck — visualizer degrades to flat line).
         var newSource = (deck === document.getElementById('audio-a')) ? sourceA : sourceB;
-        try { newSource.connect(analyser); } catch (e) { }
-        currentSource = newSource;
+        if (newSource) {
+            try { newSource.connect(analyser); } catch (e) { }
+            currentSource = newSource;
+        }
     }
 
     function resumeContext() {
