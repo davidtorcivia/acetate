@@ -5,6 +5,7 @@
     var canvas, ctx;
     var audioCtx = null;
     var analyser = null;
+    var silentGain = null;
     var sourceA = null, sourceB = null;
     var dataArray = null;
     var currentSource = null;
@@ -64,7 +65,16 @@
             if (streamA) sourceA = audioCtx.createMediaStreamSource(streamA);
             if (streamB) sourceB = audioCtx.createMediaStreamSource(streamB);
 
-            // Connect active source to analyser (analysis only — no destination)
+            // A MediaStreamSource needs a path to the destination for
+            // the browser to actually process audio through the graph.
+            // Route through a zero-gain node so the analyser receives
+            // data without doubling the audible output.
+            silentGain = audioCtx.createGain();
+            silentGain.gain.value = 0;
+            silentGain.connect(audioCtx.destination);
+            analyser.connect(silentGain);
+
+            // Connect active source to analyser
             if (sourceA) {
                 sourceA.connect(analyser);
                 currentSource = sourceA;
