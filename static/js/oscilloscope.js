@@ -6,9 +6,9 @@
     var audioCtx = null;
     var analyser = null;
     var silentGain = null;
-    var sourceA = null, sourceB = null;
     var dataArray = null;
     var currentSource = null;
+    var currentDeck = null;
     var initialized = false;
     var drawWidth = 0, drawHeight = 0;
     var energyEMA = 0;
@@ -27,6 +27,13 @@
         ctx = canvas.getContext('2d');
         resize();
         window.addEventListener('resize', resize);
+
+        // The AudioContext can be suspended when the tab/app is backgrounded
+        // (and is only otherwise resumed on a user gesture). Resume it as soon
+        // as we're visible again so the analyser keeps producing data.
+        document.addEventListener('visibilitychange', function () {
+            if (document.visibilityState === 'visible') resumeContext();
+        });
     }
 
     function resize() {
@@ -53,53 +60,66 @@
 
             dataArray = new Uint8Array(analyser.frequencyBinCount);
 
-            // Use captureStream to tap audio for visualisation without
-            // rerouting output through Web Audio.  Keeps the native <audio>
-            // output path intact so iOS continues playback when the screen
-            // is off or the app is backgrounded.
-            var streamA = deckA.captureStream ? deckA.captureStream()
-                        : deckA.mozCaptureStream ? deckA.mozCaptureStream() : null;
-            var streamB = deckB.captureStream ? deckB.captureStream()
-                        : deckB.mozCaptureStream ? deckB.mozCaptureStream() : null;
-
-            if (streamA) sourceA = audioCtx.createMediaStreamSource(streamA);
-            if (streamB) sourceB = audioCtx.createMediaStreamSource(streamB);
-
-            // A MediaStreamSource needs a path to the destination for
-            // the browser to actually process audio through the graph.
-            // Route through a zero-gain node so the analyser receives
-            // data without doubling the audible output.
+            // A MediaStreamSource needs a path to the destination for the
+            // browser to actually process audio through the graph.  Route the
+            // analyser through a zero-gain node so it receives data without
+            // doubling the audible output — the decks' native <audio> output
+            // path is left untouched, which keeps iOS background playback
+            // working (captureStream is only a passive tap for visualisation).
             silentGain = audioCtx.createGain();
             silentGain.gain.value = 0;
             silentGain.connect(audioCtx.destination);
             analyser.connect(silentGain);
 
-            // Connect active source to analyser
-            if (sourceA) {
-                sourceA.connect(analyser);
-                currentSource = sourceA;
-            }
+            // A deck's captured audio track is replaced every time it loads a
+            // new src, and may not be live yet at warm-up (the element was just
+            // play/paused).  Rebuild the active deck's source whenever a deck
+            // actually starts producing audio, so the analyser always follows
+            // the current live track instead of a stale/ended one.
+            deckA.addEventListener('playing', function () { onDeckPlaying(deckA); });
+            deckB.addEventListener('playing', function () { onDeckPlaying(deckB); });
+
+            // Connect whichever deck is already designated active.
+            rebuildSource();
         } catch (e) {
             // Web Audio / captureStream not available — oscilloscope will be flat
         }
     }
 
-    function setActiveDeck(deck) {
-        if (!analyser) return;
+    function onDeckPlaying(deck) {
+        if (deck === currentDeck) rebuildSource();
+    }
 
-        // Disconnect current from analyser
+    // Build a fresh MediaStreamSource bound to the deck's *current* live audio
+    // track.  Returns null when captureStream is unavailable (e.g. iOS) or no
+    // audio track exists yet — the visualizer then degrades to a flat line.
+    function buildSource(deck) {
+        var stream = deck.captureStream ? deck.captureStream()
+                   : deck.mozCaptureStream ? deck.mozCaptureStream() : null;
+        if (!stream || !stream.getAudioTracks().length) return null;
+        try {
+            return audioCtx.createMediaStreamSource(stream);
+        } catch (e) {
+            return null;
+        }
+    }
+
+    function rebuildSource() {
+        if (!audioCtx || !analyser || !currentDeck) return;
+
+        var fresh = buildSource(currentDeck);
+        if (!fresh) return;  // no live track yet — keep the existing connection
+
         if (currentSource) {
             try { currentSource.disconnect(analyser); } catch (e) { }
-            currentSource = null;
         }
+        currentSource = fresh;
+        try { currentSource.connect(analyser); } catch (e) { }
+    }
 
-        // Connect the new active deck's source (may be null if captureStream
-        // was unavailable for that deck — visualizer degrades to flat line).
-        var newSource = (deck === document.getElementById('audio-a')) ? sourceA : sourceB;
-        if (newSource) {
-            try { newSource.connect(analyser); } catch (e) { }
-            currentSource = newSource;
-        }
+    function setActiveDeck(deck) {
+        currentDeck = deck;
+        rebuildSource();
     }
 
     function resumeContext() {
@@ -131,6 +151,10 @@
             ctx.stroke();
             return;
         }
+
+        // Backstop: if the context got suspended mid-playback (autoplay
+        // throttling, power saving) the analyser would silently freeze.
+        if (audioCtx && audioCtx.state === 'suspended') audioCtx.resume();
 
         analyser.getByteTimeDomainData(dataArray);
 
