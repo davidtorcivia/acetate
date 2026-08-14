@@ -55,26 +55,24 @@ func GetTrackList(tracks []albums.Track, albumPath string) []TrackInfo {
 	return out
 }
 
+// Priority order must match ServeLyrics in lyrics.go.
 func detectLyricFormat(albumPath, stem string) string {
 	if _, err := os.Stat(filepath.Join(albumPath, stem+".lrc")); err == nil {
 		return "lrc"
 	}
-	if _, err := os.Stat(filepath.Join(albumPath, stem+".srt")); err == nil {
-		return "lrc"
+	if _, err := os.Stat(filepath.Join(albumPath, stem+".txt")); err == nil {
+		return "text"
 	}
 	if _, err := os.Stat(filepath.Join(albumPath, stem+".md")); err == nil {
 		return "markdown"
 	}
-	if _, err := os.Stat(filepath.Join(albumPath, stem+".txt")); err == nil {
-		return "text"
-	}
 	return ""
 }
 
-func ServeCover(w http.ResponseWriter, r *http.Request, albumPath, dataPath string, albumID ...int64) {
+func ServeCover(w http.ResponseWriter, r *http.Request, albumPath, dataPath string, albumID int64) {
 	// Check for per-album admin-uploaded override first.
-	if len(albumID) > 0 && albumID[0] > 0 {
-		overridePath := filepath.Join(dataPath, "covers", strconv.FormatInt(albumID[0], 10), "cover_override.jpg")
+	if albumID > 0 {
+		overridePath := filepath.Join(dataPath, "covers", strconv.FormatInt(albumID, 10), "cover_override.jpg")
 		if info, err := os.Stat(overridePath); err == nil {
 			serveCoverFile(w, r, overridePath, info)
 			return
@@ -101,14 +99,8 @@ func ServeCover(w http.ResponseWriter, r *http.Request, albumPath, dataPath stri
 }
 
 func serveCoverFile(w http.ResponseWriter, r *http.Request, path string, info os.FileInfo) {
-	etag := fmt.Sprintf(`"%x-%x"`, info.ModTime().Unix(), info.Size())
-	w.Header().Set("ETag", etag)
+	// ETag + modtime let http.ServeContent answer conditional requests (304).
 	w.Header().Set("Cache-Control", "private, max-age=3600")
-
-	if match := r.Header.Get("If-None-Match"); match == etag {
-		w.WriteHeader(http.StatusNotModified)
-		return
-	}
 
 	f, err := os.Open(path)
 	if err != nil {
@@ -117,6 +109,7 @@ func serveCoverFile(w http.ResponseWriter, r *http.Request, path string, info os
 	}
 	defer f.Close()
 
+	w.Header().Set("ETag", fmt.Sprintf(`"%x-%x"`, info.ModTime().Unix(), info.Size()))
 	http.ServeContent(w, r, filepath.Base(path), info.ModTime(), f)
 }
 
@@ -128,17 +121,6 @@ func StreamTrack(w http.ResponseWriter, r *http.Request, albumPath, stem string)
 		return
 	}
 
-	// ETag for caching.
-	h := sha256.New()
-	h.Write([]byte(fmt.Sprintf("%s-%d-%d", stem, info.ModTime().Unix(), info.Size())))
-	etag := fmt.Sprintf(`"%x"`, h.Sum(nil)[:8])
-	w.Header().Set("ETag", etag)
-
-	if match := r.Header.Get("If-None-Match"); match == etag {
-		w.WriteHeader(http.StatusNotModified)
-		return
-	}
-
 	f, err := os.Open(mp3Path)
 	if err != nil {
 		http.NotFound(w, r)
@@ -146,6 +128,10 @@ func StreamTrack(w http.ResponseWriter, r *http.Request, albumPath, stem string)
 	}
 	defer f.Close()
 
+	// ETag lets http.ServeContent answer conditional and range requests.
+	h := sha256.New()
+	h.Write([]byte(fmt.Sprintf("%s-%d-%d", stem, info.ModTime().Unix(), info.Size())))
+	w.Header().Set("ETag", fmt.Sprintf(`"%x"`, h.Sum(nil)[:8]))
 	w.Header().Set("Content-Type", "audio/mpeg")
 	w.Header().Set("Accept-Ranges", "bytes")
 	http.ServeContent(w, r, stem+".mp3", time.Time{}, f)

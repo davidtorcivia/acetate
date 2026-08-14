@@ -72,11 +72,21 @@ func (s *Server) handleAdminCreateAlbum(w http.ResponseWriter, r *http.Request) 
 		jsonError(w, "title and album_path are required", http.StatusBadRequest)
 		return
 	}
+	if len(title) > 256 || len(artist) > 256 {
+		jsonError(w, "bad request", http.StatusBadRequest)
+		return
+	}
 
-	// Resolve relative folder names against the album base path
+	// Resolve relative folder names against the album base path.
 	if s.albumBasePath != "" && !filepath.IsAbs(albumPath) {
 		albumPath = filepath.Join(s.albumBasePath, albumPath)
 	}
+	cleaned := filepath.Clean(albumPath)
+	if info, err := os.Stat(cleaned); err != nil || !info.IsDir() {
+		jsonError(w, "album_path is not a readable directory", http.StatusBadRequest)
+		return
+	}
+	albumPath = cleaned
 
 	alb, err := s.albumStore.CreateAlbum(title, artist, albumPath)
 	if err != nil {
@@ -291,9 +301,11 @@ func (s *Server) handleAdminListAlbumFolders(w http.ResponseWriter, r *http.Requ
 
 	folders := make([]string, 0)
 	for _, e := range entries {
-		if e.IsDir() {
-			folders = append(folders, e.Name())
+		name := e.Name()
+		if !e.IsDir() || strings.HasPrefix(name, ".") {
+			continue
 		}
+		folders = append(folders, name)
 	}
 
 	jsonOK(w, map[string]interface{}{"folders": folders})

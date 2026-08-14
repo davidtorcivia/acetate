@@ -1155,8 +1155,8 @@ func TestAdminAnalyticsFiltersByStem(t *testing.T) {
 	env := setupTest(t)
 	adminCookies := env.authenticateAdmin(t)
 
-	_, _ = env.srv.db.Exec("INSERT INTO events (session_id, event_type, track_stem, created_at) VALUES ('s1', 'play', '01-gathering', datetime('now'))")
-	_, _ = env.srv.db.Exec("INSERT INTO events (session_id, event_type, track_stem, created_at) VALUES ('s2', 'play', '02-hollow', datetime('now'))")
+	_, _ = env.srv.db.Exec("INSERT INTO events (session_id, event_type, track_stem, album_id, created_at) VALUES ('s1', 'play', '01-gathering', ?, datetime('now'))", env.albumID)
+	_, _ = env.srv.db.Exec("INSERT INTO events (session_id, event_type, track_stem, album_id, created_at) VALUES ('s2', 'play', '02-hollow', ?, datetime('now'))", env.albumID)
 
 	req, _ := http.NewRequest(http.MethodGet, env.ts.URL+fmt.Sprintf("/admin/api/albums/%d/analytics?stems=01-gathering", env.albumID), nil)
 	for _, c := range adminCookies {

@@ -78,20 +78,7 @@ func (m *Manager) Update(cfg Config) error {
 	return nil
 }
 
-// Reload re-reads config.json from disk.
-func (m *Manager) Reload() error {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	return m.loadLocked()
-}
-
 func (m *Manager) load() error {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	return m.loadLocked()
-}
-
-func (m *Manager) loadLocked() error {
 	configPath := filepath.Join(m.dataPath, "config.json")
 	data, err := os.ReadFile(configPath)
 	if err != nil {
@@ -103,8 +90,10 @@ func (m *Manager) loadLocked() error {
 		return fmt.Errorf("parse config: %w", err)
 	}
 
+	m.mu.Lock()
 	cloned := cloneConfig(cfg)
 	m.config = &cloned
+	m.mu.Unlock()
 	return nil
 }
 

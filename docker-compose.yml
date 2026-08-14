@@ -10,6 +10,8 @@ services:
       - LISTEN_ADDR=:8080
       - ALBUM_PATH=/album
       - DATA_PATH=/data
+      - ADMIN_USERNAME=${ADMIN_USERNAME:-}
+      - ADMIN_PASSWORD_HASH=${ADMIN_PASSWORD_HASH:-}
     restart: unless-stopped
 
   wizard:

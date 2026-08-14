@@ -16,9 +16,9 @@ import (
 type contextKey string
 
 const (
-	adminUserIDKey   contextKey = "admin_user_id"
-	sessionPwIDKey   contextKey = "session_password_id"
-	requestAlbumKey  contextKey = "request_album"
+	adminUserIDKey  contextKey = "admin_user_id"
+	sessionPwIDKey  contextKey = "session_password_id"
+	requestAlbumKey contextKey = "request_album"
 )
 
 // requireSession checks for a valid listener session cookie and stores password_id in context.
@@ -206,17 +206,26 @@ func securityHeaders(next http.Handler) http.Handler {
 	})
 }
 
-// requestLogger logs HTTP requests.
+// requestLogger logs HTTP requests, skipping successful audio stream requests
+// (they fire in bursts during seeking/preload and add noise without value).
 func requestLogger(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		start := time.Now()
 		wrapped := &statusWriter{ResponseWriter: w, status: 200}
 		next.ServeHTTP(wrapped, r)
-		if strings.HasPrefix(r.URL.Path, "/api/stream/") && wrapped.status < http.StatusBadRequest {
+		if isStreamPath(r.URL.Path) && wrapped.status < http.StatusBadRequest {
 			return
 		}
 		log.Printf("%s %s %d %s", r.Method, r.URL.Path, wrapped.status, time.Since(start).Round(time.Millisecond))
 	})
+}
+
+func isStreamPath(path string) bool {
+	// Route shape: /api/albums/{slug}/stream/{stem}
+	if !strings.HasPrefix(path, "/api/albums/") {
+		return false
+	}
+	return strings.Contains(path, "/stream/")
 }
 
 type statusWriter struct {

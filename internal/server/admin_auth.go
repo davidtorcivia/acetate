@@ -158,7 +158,7 @@ func (s *Server) authenticateAdminCredentials(username, password string) (adminU
 		"SELECT id, username, password_hash, require_password_reset FROM admin_users WHERE username = ? AND is_active = 1",
 		normalizedUsername,
 	).Scan(&user.ID, &user.Username, &user.PasswordHash, &requireReset)
-	if err == sql.ErrNoRows {
+	if errors.Is(err, sql.ErrNoRows) {
 		_ = bcrypt.CompareHashAndPassword([]byte(dummyAdminPasswordHash), []byte(password))
 		return user, errAdminInvalidCreds
 	}
@@ -189,7 +189,7 @@ func (s *Server) updateAdminPassword(userID int64, currentPassword, newPassword 
 
 	var currentHash string
 	err := s.db.QueryRow("SELECT password_hash FROM admin_users WHERE id = ? AND is_active = 1", userID).Scan(&currentHash)
-	if err == sql.ErrNoRows {
+	if errors.Is(err, sql.ErrNoRows) {
 		return errAdminInvalidCreds
 	}
 	if err != nil {
@@ -217,19 +217,6 @@ func (s *Server) updateAdminPassword(userID int64, currentPassword, newPassword 
 		return fmt.Errorf("revoke admin sessions: %w", err)
 	}
 	return nil
-}
-
-func (s *Server) getAdminUsernameByID(userID int64) (string, error) {
-	if userID <= 0 {
-		return "", errors.New("invalid admin user id")
-	}
-
-	var username string
-	err := s.db.QueryRow("SELECT username FROM admin_users WHERE id = ? AND is_active = 1", userID).Scan(&username)
-	if err != nil {
-		return "", err
-	}
-	return username, nil
 }
 
 func (s *Server) getAdminIdentityByID(userID int64) (adminUserRecord, error) {

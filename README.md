@@ -233,7 +233,7 @@ ADMIN_PASSWORD_HASH=$2a$10$replace-with-bcrypt-hash
 ### Environment variables
 
 | Variable | Default | Description |
-|---|---|---|
+| --- | --- | --- |
 | `LISTEN_ADDR` | `:8080` | HTTP bind address |
 | `ALBUM_PATH` | `./album` | Default album directory (used for initial migration) |
 | `DATA_PATH` | `./data` | Writable state directory (database) |
@@ -267,6 +267,7 @@ Admin endpoints:
 - `PUT /admin/api/admin-users/{id}` — update admin user
 - `PUT /admin/api/admin-password` — change own admin password
 - `GET /admin/api/albums` — list all albums
+- `GET /admin/api/album-folders` — list candidate album folders under the album base path
 - `POST /admin/api/albums` — create album
 - `GET /admin/api/albums/{id}` — get album
 - `PUT /admin/api/albums/{id}` — update album
@@ -383,7 +384,6 @@ Back up `data/`:
 
 ```text
 cmd/
-  hashpass/
   server/
   setupwizard/
 internal/

@@ -19,11 +19,10 @@ import (
 
 	"github.com/go-chi/chi/v5"
 
-	acetate "acetate"
+	"acetate"
 	"acetate/internal/album"
 	"acetate/internal/albums"
 	"acetate/internal/analytics"
-	"acetate/internal/auth"
 )
 
 func (s *Server) routes() http.Handler {
@@ -114,9 +113,6 @@ func (s *Server) routes() http.Handler {
 	return r
 }
 
-// Ensure interfaces are used to prevent "imported and not used" errors.
-var _ = auth.VerifyPassphrase
-
 // --- Auth handlers ---
 
 func (s *Server) handleAuth(w http.ResponseWriter, r *http.Request) {
@@ -135,7 +131,7 @@ func (s *Server) handleAuth(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	passwordID, albumIDs, err := s.albumStore.VerifyPassword(req.Passphrase)
+	passwordID, err := s.albumStore.VerifyPassword(req.Passphrase)
 	if err != nil {
 		log.Printf("verify password error: %v", err)
 		jsonError(w, "internal error", http.StatusInternalServerError)
@@ -191,7 +187,6 @@ func (s *Server) handleAuth(w http.ResponseWriter, r *http.Request) {
 		albumList = append(albumList, albumResponse{Slug: a.Slug, Title: a.Title, Artist: a.Artist})
 	}
 
-	_ = albumIDs // album IDs already captured via GetAlbumsForPassword
 	jsonOK(w, map[string]interface{}{
 		"status": "ok",
 		"albums": albumList,
@@ -276,10 +271,10 @@ func (s *Server) handleGetTracks(w http.ResponseWriter, r *http.Request) {
 
 	trackInfos := album.GetTrackList(tracks, alb.AlbumPath)
 	jsonOK(w, map[string]interface{}{
-		"title":              alb.Title,
-		"artist":             alb.Artist,
-		"tracks":             trackInfos,
-		"downloads_enabled":  alb.DownloadsEnabled,
+		"title":             alb.Title,
+		"artist":            alb.Artist,
+		"tracks":            trackInfos,
+		"downloads_enabled": alb.DownloadsEnabled,
 	})
 }
 
@@ -318,11 +313,11 @@ func (s *Server) handleStreamTrack(w http.ResponseWriter, r *http.Request) {
 		filename := stem + ".mp3"
 		for _, t := range tracks {
 			if t.Stem == stem && t.Title != "" {
-				filename = t.Title + ".mp3"
+				filename = sanitizeDownloadFilename(t.Title) + ".mp3"
 				break
 			}
 		}
-		w.Header().Set("Content-Disposition", "attachment; filename=\""+strings.ReplaceAll(filename, "\"", "")+"\"")
+		w.Header().Set("Content-Disposition", "attachment; filename=\""+filename+"\"")
 	}
 
 	album.StreamTrack(w, r, alb.AlbumPath, stem)
@@ -689,14 +684,16 @@ func (s *Server) handleAdminUploadCover(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	img, format, err := image.Decode(bytes.NewReader(data))
-	if err != nil || (format != "jpeg" && format != "png") {
+	// Check dimensions from the header before decoding — a small compressed
+	// payload can otherwise expand into a huge allocation (decompression bomb).
+	cfg, _, err := image.DecodeConfig(bytes.NewReader(data))
+	if err != nil || cfg.Width <= 0 || cfg.Height <= 0 || cfg.Width > 4096 || cfg.Height > 4096 {
 		jsonError(w, "bad request", http.StatusBadRequest)
 		return
 	}
 
-	b := img.Bounds()
-	if b.Dx() <= 0 || b.Dy() <= 0 || b.Dx() > 4096 || b.Dy() > 4096 {
+	img, format, err := image.Decode(bytes.NewReader(data))
+	if err != nil || (format != "jpeg" && format != "png") {
 		jsonError(w, "bad request", http.StatusBadRequest)
 		return
 	}
@@ -758,11 +755,7 @@ func (s *Server) handleSPA(w http.ResponseWriter, r *http.Request) {
 		path = "index.html"
 	}
 
-	if strings.Contains(path, "..") {
-		http.NotFound(w, r)
-		return
-	}
-
+	// Unmatched paths fall back to the SPA shell.
 	if _, err := fs.Stat(staticFS, path); err != nil {
 		path = "index.html"
 	}
@@ -791,11 +784,6 @@ func (s *Server) handleAdminStatic(w http.ResponseWriter, r *http.Request) {
 
 	// Don't serve admin static for API paths
 	if strings.HasPrefix(path, "api/") {
-		http.NotFound(w, r)
-		return
-	}
-
-	if strings.Contains(path, "..") {
 		http.NotFound(w, r)
 		return
 	}
@@ -853,6 +841,27 @@ func normalizeAdminTrackUpdate(input []struct {
 	}
 
 	return normalized, nil
+}
+
+// sanitizeDownloadFilename strips characters that are unsafe in a
+// Content-Disposition header parameter (control bytes, quotes, path separators).
+func sanitizeDownloadFilename(name string) string {
+	var b strings.Builder
+	for _, r := range name {
+		switch {
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9':
+			b.WriteRune(r)
+		case strings.ContainsRune(" ._()'&+,!@^=~[]-", r):
+			b.WriteRune(r)
+		}
+	}
+	out := strings.TrimSpace(b.String())
+	// Collapse any residual leading dots so the name can't become a dotfile.
+	out = strings.TrimLeft(out, ".")
+	if out == "" {
+		return "track"
+	}
+	return out
 }
 
 // adminAlbumFromRequest extracts and validates the album {id} from the admin URL.

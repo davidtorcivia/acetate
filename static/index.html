@@ -1,83 +1,221 @@
-<!DOCTYPE html>
+<!doctype html>
 <html lang="en">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
-    <meta name="theme-color" content="#0a0908">
-    <meta name="description" content="A listening room.">
-    <meta name="apple-mobile-web-app-capable" content="yes">
-    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
-    <title>Acetate</title>
-    <link rel="icon" href="/favicon.svg" type="image/svg+xml">
-    <link rel="manifest" href="/manifest.json">
-    <link rel="stylesheet" href="/css/style.css">
-    <link rel="preload" href="/fonts/eb-garamond-v27-latin-regular.woff2" as="font" type="font/woff2" crossorigin>
-    <link rel="preload" href="/fonts/inter-v13-latin-regular.woff2" as="font" type="font/woff2" crossorigin>
-</head>
-<body>
-    <!-- Gate -->
-    <div id="gate" class="screen active">
-        <div class="gate-inner">
-            <p class="gate-prompt">Enter Passphrase</p>
-            <input type="text" id="passphrase" placeholder="Passphrase" autocomplete="off" spellcheck="false" aria-label="Passphrase" autofocus>
-        </div>
-    </div>
-
-    <!-- Album Selector -->
-    <div id="selector" class="screen">
-        <div class="selector-inner">
-            <p class="selector-prompt">Choose an Album</p>
-            <div id="album-grid" class="album-grid"></div>
-        </div>
-    </div>
-
-    <!-- Player -->
-    <div id="player" class="screen">
-        <div class="player-inner">
-            <img id="cover" class="cover" alt="Album cover" draggable="false">
-            <canvas id="oscilloscope"></canvas>
-            <div id="track-title" class="track-title" aria-live="polite"></div>
-            <div id="lyrics-container" class="lyrics-container" aria-label="Lyrics" tabindex="0">
-                <div id="lyrics" class="lyrics"></div>
-            </div>
-            <div class="controls">
-                <div class="control-buttons">
-                    <button id="btn-prev" class="control-btn" aria-label="Previous track"><svg width="16" height="14" viewBox="0 0 16 14" fill="currentColor"><rect x="0" y="0" width="2.5" height="14"/><polygon points="15,0 4,7 15,14"/></svg></button>
-                    <button id="btn-play" class="control-btn control-btn-main" aria-label="Play"><svg width="18" height="20" viewBox="0 0 18 20" fill="currentColor"><polygon points="2,0 18,10 2,20"/></svg></button>
-                    <button id="btn-next" class="control-btn" aria-label="Next track"><svg width="16" height="14" viewBox="0 0 16 14" fill="currentColor"><polygon points="1,0 12,7 1,14"/><rect x="13.5" y="0" width="2.5" height="14"/></svg></button>
+        <head>
+                <meta charset="UTF-8" />
+                <meta
+                        name="viewport"
+                        content="width=device-width, initial-scale=1.0, viewport-fit=cover"
+                />
+                <meta name="theme-color" content="#0a0908" />
+                <meta name="description" content="A listening room." />
+                <meta name="apple-mobile-web-app-capable" content="yes" />
+                <meta
+                        name="apple-mobile-web-app-status-bar-style"
+                        content="black-translucent"
+                />
+                <title>Acetate</title>
+                <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
+                <link rel="manifest" href="/manifest.json" />
+                <link rel="stylesheet" href="/css/style.css" />
+                <link
+                        rel="preload"
+                        href="/fonts/eb-garamond-v27-latin-regular.woff2"
+                        as="font"
+                        type="font/woff2"
+                        crossorigin
+                />
+                <link
+                        rel="preload"
+                        href="/fonts/inter-v13-latin-regular.woff2"
+                        as="font"
+                        type="font/woff2"
+                        crossorigin
+                />
+        </head>
+        <body>
+                <!-- Gate -->
+                <div id="gate" class="screen active">
+                        <div class="gate-inner">
+                                <p class="gate-prompt">Enter Passphrase</p>
+                                <input
+                                        type="password"
+                                        id="passphrase"
+                                        placeholder="Passphrase"
+                                        autocomplete="off"
+                                        spellcheck="false"
+                                        aria-label="Passphrase"
+                                        autofocus
+                                />
+                        </div>
                 </div>
-                <div class="progress-container">
-                    <input type="range" id="progress" class="progress" min="0" max="100" step="0.1" value="0" aria-label="Playback position">
-                    <div class="progress-times">
-                        <span id="time-current">0:00</span>
-                        <span id="time-total">0:00</span>
-                    </div>
-                </div>
-                <div class="volume-container">
-                    <button id="btn-mute" class="control-btn volume-btn" aria-label="Mute">VOL</button>
-                    <input type="range" id="volume" class="volume" min="0" max="1" step="0.01" value="1" aria-label="Volume">
-                </div>
-            </div>
-            <button id="tracklist-toggle" class="tracklist-toggle" type="button" aria-expanded="false" aria-controls="tracklist">
-                <span class="tracklist-arrow">&#x25BD;</span> Track List
-            </button>
-            <div id="tracklist" class="tracklist collapsed" aria-label="Track list">
-                <ol id="tracklist-items"></ol>
-            </div>
-        </div>
-    </div>
 
-    <!-- Audio elements (double-deck for gapless) -->
-    <audio id="audio-a" preload="auto"></audio>
-    <audio id="audio-b" preload="auto"></audio>
+                <!-- Album Selector -->
+                <div id="selector" class="screen">
+                        <div class="selector-inner">
+                                <p class="selector-prompt">Choose an Album</p>
+                                <div id="album-grid" class="album-grid"></div>
+                        </div>
+                </div>
 
-    <script src="/js/app.js"></script>
-    <script src="/js/gate.js"></script>
-    <script src="/js/selector.js"></script>
-    <script src="/js/player.js"></script>
-    <script src="/js/tracklist.js"></script>
-    <script src="/js/oscilloscope.js"></script>
-    <script src="/js/lyrics.js"></script>
-    <script src="/js/analytics.js"></script>
-</body>
+                <!-- Player -->
+                <div id="player" class="screen">
+                        <div class="player-inner">
+                                <img
+                                        id="cover"
+                                        class="cover"
+                                        alt="Album cover"
+                                        draggable="false"
+                                />
+                                <canvas id="oscilloscope"></canvas>
+                                <div
+                                        id="track-title"
+                                        class="track-title"
+                                        aria-live="polite"
+                                ></div>
+                                <div
+                                        id="lyrics-container"
+                                        class="lyrics-container"
+                                        aria-label="Lyrics"
+                                        tabindex="0"
+                                >
+                                        <div id="lyrics" class="lyrics"></div>
+                                </div>
+                                <div class="controls">
+                                        <div class="control-buttons">
+                                                <button
+                                                        id="btn-prev"
+                                                        class="control-btn"
+                                                        aria-label="Previous track"
+                                                >
+                                                        <svg
+                                                                width="16"
+                                                                height="14"
+                                                                viewBox="0 0 16 14"
+                                                                fill="currentColor"
+                                                        >
+                                                                <rect
+                                                                        x="0"
+                                                                        y="0"
+                                                                        width="2.5"
+                                                                        height="14"
+                                                                />
+                                                                <polygon
+                                                                        points="15,0 4,7 15,14"
+                                                                />
+                                                        </svg>
+                                                </button>
+                                                <button
+                                                        id="btn-play"
+                                                        class="control-btn control-btn-main"
+                                                        aria-label="Play"
+                                                >
+                                                        <svg
+                                                                width="18"
+                                                                height="20"
+                                                                viewBox="0 0 18 20"
+                                                                fill="currentColor"
+                                                        >
+                                                                <polygon
+                                                                        points="2,0 18,10 2,20"
+                                                                />
+                                                        </svg>
+                                                </button>
+                                                <button
+                                                        id="btn-next"
+                                                        class="control-btn"
+                                                        aria-label="Next track"
+                                                >
+                                                        <svg
+                                                                width="16"
+                                                                height="14"
+                                                                viewBox="0 0 16 14"
+                                                                fill="currentColor"
+                                                        >
+                                                                <polygon
+                                                                        points="1,0 12,7 1,14"
+                                                                />
+                                                                <rect
+                                                                        x="13.5"
+                                                                        y="0"
+                                                                        width="2.5"
+                                                                        height="14"
+                                                                />
+                                                        </svg>
+                                                </button>
+                                        </div>
+                                        <div class="progress-container">
+                                                <input
+                                                        type="range"
+                                                        id="progress"
+                                                        class="progress"
+                                                        min="0"
+                                                        max="100"
+                                                        step="0.1"
+                                                        value="0"
+                                                        aria-label="Playback position"
+                                                />
+                                                <div class="progress-times">
+                                                        <span id="time-current"
+                                                                >0:00</span
+                                                        >
+                                                        <span id="time-total"
+                                                                >0:00</span
+                                                        >
+                                                </div>
+                                        </div>
+                                        <div class="volume-container">
+                                                <button
+                                                        id="btn-mute"
+                                                        class="control-btn volume-btn"
+                                                        aria-label="Mute"
+                                                >
+                                                        VOL
+                                                </button>
+                                                <input
+                                                        type="range"
+                                                        id="volume"
+                                                        class="volume"
+                                                        min="0"
+                                                        max="1"
+                                                        step="0.01"
+                                                        value="1"
+                                                        aria-label="Volume"
+                                                />
+                                        </div>
+                                </div>
+                                <button
+                                        id="tracklist-toggle"
+                                        class="tracklist-toggle"
+                                        type="button"
+                                        aria-expanded="false"
+                                        aria-controls="tracklist"
+                                >
+                                        <span class="tracklist-arrow"
+                                                >&#x25BD;</span
+                                        >
+                                        Track List
+                                </button>
+                                <div
+                                        id="tracklist"
+                                        class="tracklist collapsed"
+                                        aria-label="Track list"
+                                >
+                                        <ol id="tracklist-items"></ol>
+                                </div>
+                        </div>
+                </div>
+
+                <!-- Audio elements (double-deck for gapless) -->
+                <audio id="audio-a" preload="auto"></audio>
+                <audio id="audio-b" preload="auto"></audio>
+
+                <script src="/js/app.js"></script>
+                <script src="/js/gate.js"></script>
+                <script src="/js/selector.js"></script>
+                <script src="/js/player.js"></script>
+                <script src="/js/tracklist.js"></script>
+                <script src="/js/oscilloscope.js"></script>
+                <script src="/js/lyrics.js"></script>
+                <script src="/js/analytics.js"></script>
+        </body>
 </html>

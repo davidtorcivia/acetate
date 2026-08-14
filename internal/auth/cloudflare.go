@@ -125,6 +125,8 @@ func (cf *CloudflareIPs) refresh() {
 }
 
 func (cf *CloudflareIPs) refreshLoop() {
+	cf.refresh()
+
 	ticker := time.NewTicker(24 * time.Hour)
 	defer ticker.Stop()
 

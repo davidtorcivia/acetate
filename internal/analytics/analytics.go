@@ -177,7 +177,7 @@ func (c *Collector) flushLoop() {
 			close(ack)
 
 		case <-c.done:
-			// Drain remaining events with timeout
+			// Drain remaining events with timeout.
 			drainDone := make(chan struct{})
 			go func() {
 				defer close(drainDone)
@@ -197,7 +197,8 @@ func (c *Collector) flushLoop() {
 			select {
 			case <-drainDone:
 			case <-time.After(DrainTimeout):
-				log.Printf("analytics: drain timeout, %d events may be lost", len(batch))
+				// batch is owned by the drain goroutine here; don't read it.
+				log.Printf("analytics: drain timeout, buffered events may be lost")
 			}
 			return
 		}

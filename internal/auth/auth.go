@@ -11,8 +11,6 @@ import (
 	"strings"
 	"sync"
 	"time"
-
-	"golang.org/x/crypto/bcrypt"
 )
 
 const (
@@ -121,11 +119,6 @@ func (s *SessionStore) DeleteSession(id string) error {
 	return err
 }
 
-// CreateAdminSession generates a new admin session.
-func (s *SessionStore) CreateAdminSession() (string, error) {
-	return s.CreateAdminSessionWithContext(0, "", "")
-}
-
 // CreateAdminSessionWithContext generates a new admin session bound to coarse client fingerprints.
 func (s *SessionStore) CreateAdminSessionWithContext(userID int64, ip, userAgent string) (string, error) {
 	if userID <= 0 {
@@ -229,20 +222,6 @@ func (s *SessionStore) DeleteAdminSessionsForUser(userID int64) error {
 	}
 	_, err := s.db.Exec("DELETE FROM admin_sessions WHERE user_id = ?", userID)
 	return err
-}
-
-// VerifyPassphrase compares a plaintext passphrase against either a bcrypt hash
-// or a legacy/plaintext config value.
-func VerifyPassphrase(passphrase, stored string) bool {
-	if strings.TrimSpace(stored) == "" {
-		return false
-	}
-
-	if isLikelyBcryptHash(stored) {
-		return bcrypt.CompareHashAndPassword([]byte(stored), []byte(passphrase)) == nil
-	}
-
-	return subtle.ConstantTimeCompare([]byte(stored), []byte(passphrase)) == 1
 }
 
 func isLikelyBcryptHash(v string) bool {

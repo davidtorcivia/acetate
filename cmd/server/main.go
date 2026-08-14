@@ -62,7 +62,11 @@ func main() {
 	}
 	log.Printf("loaded %d album(s)", len(allAlbums))
 	for _, a := range allAlbums {
-		tracks, _ := albumStore.GetTracks(a.ID)
+		tracks, err := albumStore.GetTracks(a.ID)
+		if err != nil {
+			log.Printf("  album %q (%s): track load error: %v", a.Title, a.Slug, err)
+			continue
+		}
 		log.Printf("  album %q (%s) — %d tracks", a.Title, a.Slug, len(tracks))
 	}
 

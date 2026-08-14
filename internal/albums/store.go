@@ -235,15 +235,6 @@ func (s *Store) SetTracks(albumID int64, tracks []Track) error {
 	return tx.Commit()
 }
 
-// StemInAlbum checks if a stem exists in an album's track list.
-func (s *Store) StemInAlbum(albumID int64, stem string) (bool, error) {
-	var count int
-	err := s.db.QueryRow(
-		"SELECT COUNT(*) FROM album_tracks WHERE album_id = ? AND stem = ?", albumID, stem,
-	).Scan(&count)
-	return count > 0, err
-}
-
 // GetAllTrackCounts returns a map of album_id → track count for all albums in one query.
 func (s *Store) GetAllTrackCounts() (map[int64]int, error) {
 	rows, err := s.db.Query("SELECT album_id, COUNT(*) FROM album_tracks GROUP BY album_id")
@@ -408,11 +399,11 @@ func (s *Store) DeletePassword(id int64) error {
 }
 
 // VerifyPassword checks a passphrase against all stored password hashes.
-// Returns the matching password ID and accessible album IDs, or (0, nil) if no match.
-func (s *Store) VerifyPassword(passphrase string) (int64, []int64, error) {
+// Returns the matching password ID, or 0 if nothing matched.
+func (s *Store) VerifyPassword(passphrase string) (int64, error) {
 	rows, err := s.db.Query("SELECT id, password_hash FROM listener_passwords")
 	if err != nil {
-		return 0, nil, err
+		return 0, err
 	}
 	defer rows.Close()
 
@@ -420,21 +411,17 @@ func (s *Store) VerifyPassword(passphrase string) (int64, []int64, error) {
 		var id int64
 		var hash string
 		if err := rows.Scan(&id, &hash); err != nil {
-			return 0, nil, err
+			return 0, err
 		}
 		if bcrypt.CompareHashAndPassword([]byte(hash), []byte(passphrase)) == nil {
-			albumIDs, err := s.getAlbumIDsForPassword(id)
-			if err != nil {
-				return 0, nil, err
-			}
-			return id, albumIDs, nil
+			return id, nil
 		}
 	}
 	if err := rows.Err(); err != nil {
-		return 0, nil, err
+		return 0, err
 	}
 
-	return 0, nil, nil
+	return 0, nil
 }
 
 // GetAlbumsForPassword returns the albums a password grants access to.

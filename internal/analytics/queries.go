@@ -49,11 +49,6 @@ type QueryFilter struct {
 	AlbumID    *int64
 }
 
-// GetTrackStats returns per-track analytics.
-func GetTrackStats(db *sql.DB) ([]TrackStats, error) {
-	return GetTrackStatsFiltered(db, QueryFilter{})
-}
-
 // GetTrackStatsFiltered returns per-track analytics with optional filtering.
 func GetTrackStatsFiltered(db *sql.DB, filter QueryFilter) ([]TrackStats, error) {
 	filter = normalizeFilter(filter)
@@ -98,11 +93,6 @@ func GetTrackStatsFiltered(db *sql.DB, filter QueryFilter) ([]TrackStats, error)
 		stats = append(stats, s)
 	}
 	return stats, rows.Err()
-}
-
-// GetDropoutHeatmap returns dropout distribution for a track in 10 bins.
-func GetDropoutHeatmap(db *sql.DB, stem string) ([]DropoutBin, error) {
-	return GetDropoutHeatmapFiltered(db, stem, QueryFilter{})
 }
 
 // GetDropoutHeatmapFiltered returns dropout distribution for a track in 10 bins with optional date filtering.
@@ -183,11 +173,6 @@ func GetDropoutHeatmapFiltered(db *sql.DB, stem string, filter QueryFilter) ([]D
 	return bins, nil
 }
 
-// GetSessionTimeline returns recent sessions with track counts.
-func GetSessionTimeline(db *sql.DB, limit int) ([]SessionInfo, error) {
-	return GetSessionTimelineFiltered(db, limit, QueryFilter{})
-}
-
 // GetSessionTimelineFiltered returns recent sessions with optional filters.
 func GetSessionTimelineFiltered(db *sql.DB, limit int, filter QueryFilter) ([]SessionInfo, error) {
 	filter = normalizeFilter(filter)
@@ -251,11 +236,6 @@ func GetSessionTimelineFiltered(db *sql.DB, limit int, filter QueryFilter) ([]Se
 		sessions = append(sessions, s)
 	}
 	return sessions, rows.Err()
-}
-
-// GetOverallStats returns aggregate analytics.
-func GetOverallStats(db *sql.DB) (*OverallStats, error) {
-	return GetOverallStatsFiltered(db, QueryFilter{})
 }
 
 // GetOverallStatsFiltered returns aggregate analytics with optional filtering.

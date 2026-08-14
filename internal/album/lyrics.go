@@ -90,17 +90,18 @@ var (
 	allHTMLTags = regexp.MustCompile(`(?is)<[^>]+>`)
 )
 
-// renderMarkdown converts markdown to safe HTML using goldmark.
+// markdown renderer is stateless per Convert call and safe for concurrent use.
 // Raw HTML is disabled by default (goldmark's secure default).
-func renderMarkdown(src []byte) string {
-	md := goldmark.New(
-		goldmark.WithRendererOptions(
-			html.WithHardWraps(),
-		),
-	)
+var markdownRenderer = goldmark.New(
+	goldmark.WithRendererOptions(
+		html.WithHardWraps(),
+	),
+)
 
+// renderMarkdown converts markdown to safe HTML using goldmark.
+func renderMarkdown(src []byte) string {
 	var buf bytes.Buffer
-	if err := md.Convert(src, &buf); err != nil {
+	if err := markdownRenderer.Convert(src, &buf); err != nil {
 		return string(src) // fallback to raw text
 	}
 

@@ -233,7 +233,7 @@ func (s *Server) updateAdminUser(actorID, targetID int64, username *string, isAc
 		"SELECT username, is_active, require_password_reset FROM admin_users WHERE id = ?",
 		targetID,
 	).Scan(&currentUsername, &currentActive, &currentReset); err != nil {
-		if err == sql.ErrNoRows {
+		if errors.Is(err, sql.ErrNoRows) {
 			return user, errAdminUserNotFound
 		}
 		return user, fmt.Errorf("query admin user for update: %w", err)
@@ -338,7 +338,7 @@ func (s *Server) getAdminUserViewByID(userID int64) (adminUserView, error) {
 		&user.LastLoginAt,
 	)
 	if err != nil {
-		if err == sql.ErrNoRows {
+		if errors.Is(err, sql.ErrNoRows) {
 			return user, errAdminUserNotFound
 		}
 		return user, fmt.Errorf("query admin user by id: %w", err)

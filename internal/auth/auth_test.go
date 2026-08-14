@@ -150,24 +150,6 @@ func TestAdminSessionFingerprintBinding(t *testing.T) {
 	}
 }
 
-func TestVerifyPassphrase(t *testing.T) {
-	hash, _ := bcrypt.GenerateFromPassword([]byte("testpass"), bcrypt.DefaultCost)
-
-	if !VerifyPassphrase("testpass", string(hash)) {
-		t.Error("correct passphrase should verify")
-	}
-	if VerifyPassphrase("wrongpass", string(hash)) {
-		t.Error("wrong passphrase should not verify")
-	}
-
-	if !VerifyPassphrase("plain-pass", "plain-pass") {
-		t.Error("plain passphrase should verify")
-	}
-	if VerifyPassphrase("wrongpass", "plain-pass") {
-		t.Error("wrong plain passphrase should not verify")
-	}
-}
-
 func TestSessionRotation(t *testing.T) {
 	store := testDB(t)
 

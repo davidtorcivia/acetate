@@ -159,7 +159,7 @@ func TestGetTrackStats(t *testing.T) {
 	db.Exec("INSERT INTO events (session_id, event_type, track_stem) VALUES ('s1', 'complete', '01-gathering')")
 	db.Exec("INSERT INTO events (session_id, event_type, track_stem) VALUES ('s2', 'play', '01-gathering')")
 
-	stats, err := GetTrackStats(db)
+	stats, err := GetTrackStatsFiltered(db, QueryFilter{})
 	if err != nil {
 		t.Fatalf("GetTrackStats: %v", err)
 	}

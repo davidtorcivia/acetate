@@ -190,10 +190,6 @@ func (s *Server) getSessionID(r *http.Request) string {
 	return cookie.Value
 }
 
-func limitBody(r *http.Request, maxBytes int64) {
-	r.Body = http.MaxBytesReader(nil, r.Body, maxBytes)
-}
-
 // bodyLimiter middleware limits the request body size.
 func bodyLimiter(maxBytes int64) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
