@@ -1,6 +1,6 @@
 // Acetate — Oscilloscope visualizer (Web Audio API)
-(function () {
-    'use strict';
+(() => {
+    
 
     var canvas, ctx;
     var audioCtx = null;
@@ -13,6 +13,10 @@
     var drawWidth = 0, drawHeight = 0;
     var energyEMA = 0;
     var gainEMA = 1;
+    var tapRetries = 0;
+    var tapRetryTimer = null;
+    var TAP_RETRY_MS = 250;
+    var TAP_MAX_RETRIES = 12;
 
     window.AcetateOscilloscope = {
         init: initAudio,
@@ -31,7 +35,7 @@
         // The AudioContext can be suspended when the tab/app is backgrounded
         // (and is only otherwise resumed on a user gesture). Resume it as soon
         // as we're visible again so the analyser keeps producing data.
-        document.addEventListener('visibilitychange', function () {
+        document.addEventListener('visibilitychange', () => {
             if (document.visibilityState === 'visible') resumeContext();
         });
     }
@@ -76,10 +80,13 @@
             // play/paused).  Rebuild the active deck's source whenever a deck
             // actually starts producing audio, so the analyser always follows
             // the current live track instead of a stale/ended one.
-            deckA.addEventListener('playing', function () { onDeckPlaying(deckA); });
-            deckB.addEventListener('playing', function () { onDeckPlaying(deckB); });
+            deckA.addEventListener('playing', () => { onDeckPlaying(deckA); });
+            deckB.addEventListener('playing', () => { onDeckPlaying(deckB); });
 
-            // Connect whichever deck is already designated active.
+            // deckA is the player's initial active deck (see player.js init);
+            // seeding it here closes the window where 'playing' fires before
+            // the first setActiveDeck and was dropped by the null guard.
+            currentDeck = deckA;
             rebuildSource();
         } catch (e) {
             // Web Audio / captureStream not available — oscilloscope will be flat
@@ -87,28 +94,54 @@
     }
 
     function onDeckPlaying(deck) {
-        if (deck === currentDeck) rebuildSource();
+        // 'playing' is the authoritative "this deck is live now" signal, but
+        // its ordering vs. setActiveDeck (the play() promise callback) is not
+        // guaranteed — treat it as activation either way. Idempotent when the
+        // deck is already active (the rebuild then just refreshes the tap).
+        setActiveDeck(deck);
     }
 
     // Build a fresh MediaStreamSource bound to the deck's *current* live audio
-    // track.  Returns null when captureStream is unavailable (e.g. iOS) or no
-    // audio track exists yet — the visualizer then degrades to a flat line.
+    // track. Returns null when captureStream is unavailable (e.g. iOS) or the
+    // stream holds no live track yet — setting src ends the previous track and
+    // the replacement appears asynchronously, so a length check alone can bind
+    // a dead track and silence the scope.
+    function captureStreamFrom(deck) {
+        if (typeof deck.captureStream === 'function') return deck.captureStream();
+        if (typeof deck.mozCaptureStream === 'function') return deck.mozCaptureStream();
+        return null;
+    }
+
     function buildSource(deck) {
-        var stream = deck.captureStream ? deck.captureStream()
-                   : deck.mozCaptureStream ? deck.mozCaptureStream() : null;
-        if (!stream || !stream.getAudioTracks().length) return null;
-        try {
-            return audioCtx.createMediaStreamSource(stream);
-        } catch (e) {
-            return null;
+        var stream = captureStreamFrom(deck);
+        if (!stream) return null;
+
+        var tracks = stream.getAudioTracks();
+        for (var i = 0; i < tracks.length; i++) {
+            if (tracks[i].readyState === 'live') {
+                try {
+                    return audioCtx.createMediaStreamSource(stream);
+                } catch (e) {
+                    return null;
+                }
+            }
         }
+        return null;
     }
 
     function rebuildSource() {
         if (!audioCtx || !analyser || !currentDeck) return;
 
         var fresh = buildSource(currentDeck);
-        if (!fresh) return;  // no live track yet — keep the existing connection
+        if (!fresh) {
+            // The live track often appears a beat after 'playing' (and the
+            // play() promise can resolve even earlier). Retry shortly while
+            // the deck is actually playing instead of flat-lining on whatever
+            // stale connection happened to survive.
+            scheduleTapRetry();
+            return;
+        }
+        tapRetries = 0;
 
         if (currentSource) {
             try { currentSource.disconnect(analyser); } catch (e) { }
@@ -117,8 +150,20 @@
         try { currentSource.connect(analyser); } catch (e) { }
     }
 
+    function scheduleTapRetry() {
+        if (tapRetryTimer || tapRetries >= TAP_MAX_RETRIES) return;
+        tapRetries++;
+        tapRetryTimer = setTimeout(() => {
+            tapRetryTimer = null;
+            if (currentDeck && !currentDeck.paused && !currentDeck.ended) {
+                rebuildSource();
+            }
+        }, TAP_RETRY_MS);
+    }
+
     function setActiveDeck(deck) {
         currentDeck = deck;
+        tapRetries = 0; // fresh retry budget per activation
         rebuildSource();
     }
 
