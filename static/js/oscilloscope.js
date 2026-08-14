@@ -1,7 +1,5 @@
 // Acetate — Oscilloscope visualizer (Web Audio API)
 (() => {
-    
-
     var canvas, ctx;
     var audioCtx = null;
     var analyser = null;
@@ -10,7 +8,8 @@
     var currentSource = null;
     var currentDeck = null;
     var initialized = false;
-    var drawWidth = 0, drawHeight = 0;
+    var drawWidth = 0,
+        drawHeight = 0;
     var energyEMA = 0;
     var gainEMA = 1;
     var tapRetries = 0;
@@ -22,21 +21,21 @@
         init: initAudio,
         draw: draw,
         setActiveDeck: setActiveDeck,
-        resumeContext: resumeContext
+        resumeContext: resumeContext,
     };
 
     function initCanvas() {
-        canvas = document.getElementById('oscilloscope');
+        canvas = document.getElementById("oscilloscope");
         if (!canvas) return;
-        ctx = canvas.getContext('2d');
+        ctx = canvas.getContext("2d");
         resize();
-        window.addEventListener('resize', resize);
+        window.addEventListener("resize", resize);
 
         // The AudioContext can be suspended when the tab/app is backgrounded
         // (and is only otherwise resumed on a user gesture). Resume it as soon
         // as we're visible again so the analyser keeps producing data.
-        document.addEventListener('visibilitychange', () => {
-            if (document.visibilityState === 'visible') resumeContext();
+        document.addEventListener("visibilitychange", () => {
+            if (document.visibilityState === "visible") resumeContext();
         });
     }
 
@@ -80,8 +79,12 @@
             // play/paused).  Rebuild the active deck's source whenever a deck
             // actually starts producing audio, so the analyser always follows
             // the current live track instead of a stale/ended one.
-            deckA.addEventListener('playing', () => { onDeckPlaying(deckA); });
-            deckB.addEventListener('playing', () => { onDeckPlaying(deckB); });
+            deckA.addEventListener("playing", () => {
+                onDeckPlaying(deckA);
+            });
+            deckB.addEventListener("playing", () => {
+                onDeckPlaying(deckB);
+            });
 
             // deckA is the player's initial active deck (see player.js init);
             // seeding it here closes the window where 'playing' fires before
@@ -107,8 +110,10 @@
     // the replacement appears asynchronously, so a length check alone can bind
     // a dead track and silence the scope.
     function captureStreamFrom(deck) {
-        if (typeof deck.captureStream === 'function') return deck.captureStream();
-        if (typeof deck.mozCaptureStream === 'function') return deck.mozCaptureStream();
+        if (typeof deck.captureStream === "function")
+            return deck.captureStream();
+        if (typeof deck.mozCaptureStream === "function")
+            return deck.mozCaptureStream();
         return null;
     }
 
@@ -118,7 +123,7 @@
 
         var tracks = stream.getAudioTracks();
         for (var i = 0; i < tracks.length; i++) {
-            if (tracks[i].readyState === 'live') {
+            if (tracks[i].readyState === "live") {
                 try {
                     return audioCtx.createMediaStreamSource(stream);
                 } catch (e) {
@@ -144,10 +149,14 @@
         tapRetries = 0;
 
         if (currentSource) {
-            try { currentSource.disconnect(analyser); } catch (e) { }
+            try {
+                currentSource.disconnect(analyser);
+            } catch (e) {}
         }
         currentSource = fresh;
-        try { currentSource.connect(analyser); } catch (e) { }
+        try {
+            currentSource.connect(analyser);
+        } catch (e) {}
     }
 
     function scheduleTapRetry() {
@@ -168,7 +177,7 @@
     }
 
     function resumeContext() {
-        if (audioCtx && audioCtx.state === 'suspended') {
+        if (audioCtx && audioCtx.state === "suspended") {
             audioCtx.resume();
         }
     }
@@ -181,8 +190,10 @@
         var midY = height / 2;
 
         ctx.clearRect(0, 0, width, height);
-        var accent = getComputedStyle(document.documentElement)
-            .getPropertyValue('--accent').trim() || '#8a7a5a';
+        var accent =
+            getComputedStyle(document.documentElement)
+                .getPropertyValue("--accent")
+                .trim() || "#8a7a5a";
 
         if (!isPlaying || !analyser || !dataArray) {
             // Flat line — held breath
@@ -199,7 +210,7 @@
 
         // Backstop: if the context got suspended mid-playback (autoplay
         // throttling, power saving) the analyser would silently freeze.
-        if (audioCtx && audioCtx.state === 'suspended') audioCtx.resume();
+        if (audioCtx && audioCtx.state === "suspended") audioCtx.resume();
 
         analyser.getByteTimeDomainData(dataArray);
 
@@ -209,8 +220,8 @@
         }
 
         // A subtle under-stroke adds depth without glow/neon treatment.
-        ctx.lineJoin = 'round';
-        ctx.lineCap = 'round';
+        ctx.lineJoin = "round";
+        ctx.lineCap = "round";
         ctx.strokeStyle = accent;
         ctx.globalAlpha = 0.24 + Math.min(0.2, energyEMA * 2.5);
         ctx.lineWidth = 2.15;
@@ -278,5 +289,5 @@
         return Math.min(max, Math.max(min, value));
     }
 
-    document.addEventListener('DOMContentLoaded', initCanvas);
+    document.addEventListener("DOMContentLoaded", initCanvas);
 })();
