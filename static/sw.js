@@ -1,5 +1,5 @@
 // Acetate — Service Worker
-const CACHE_NAME = "acetate-static-v18";
+const CACHE_NAME = "acetate-static-v19";
 const API_CACHE = "acetate-api-v17";
 const AUDIO_CACHE = "acetate-audio-v17";
 const MAX_AUDIO_CACHE_ENTRIES = 24;
