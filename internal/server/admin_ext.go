@@ -209,17 +209,7 @@ func (s *Server) handleAdminReconcileApply(w http.ResponseWriter, r *http.Reques
 	configTracks := albumTracksToConfigTracks(dbTracks)
 	updatedConfigTracks, applied := applyReconcile(configTracks, diskTracks, req.AdoptMetadataTitles, req.KeepMissing)
 
-	// Convert back to albums.Track and save
-	newTracks := make([]albums.Track, len(updatedConfigTracks))
-	for i, ct := range updatedConfigTracks {
-		newTracks[i] = albums.Track{
-			Stem:         ct.Stem,
-			Title:        ct.Title,
-			DisplayIndex: ct.DisplayIndex,
-			SortOrder:    i,
-		}
-	}
-	if err := s.albumStore.SetTracks(alb.ID, newTracks); err != nil {
+	if err := s.albumStore.SetTracks(alb.ID, configTracksToAlbumTracks(updatedConfigTracks)); err != nil {
 		jsonError(w, "internal error", http.StatusInternalServerError)
 		return
 	}
@@ -230,6 +220,15 @@ func (s *Server) handleAdminReconcileApply(w http.ResponseWriter, r *http.Reques
 		"applied": applied,
 		"report":  report,
 	})
+}
+
+// configTracksToAlbumTracks converts config.Track to albums.Track, numbering sort order by position.
+func configTracksToAlbumTracks(tracks []config.Track) []albums.Track {
+	out := make([]albums.Track, len(tracks))
+	for i, t := range tracks {
+		out[i] = albums.Track{Stem: t.Stem, Title: t.Title, DisplayIndex: t.DisplayIndex, SortOrder: i}
+	}
+	return out
 }
 
 // albumTracksToConfigTracks converts albums.Track to config.Track for reconciliation.

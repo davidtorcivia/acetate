@@ -310,7 +310,7 @@ func (s *Server) handleStreamTrack(w http.ResponseWriter, r *http.Request) {
 	// Support ?dl=1 for download when downloads are enabled for this album.
 	if r.URL.Query().Get("dl") == "1" && alb.DownloadsEnabled {
 		// Find the track title for a friendly filename.
-		filename := stem + ".mp3"
+		filename := sanitizeDownloadFilename(stem) + ".mp3"
 		for _, t := range tracks {
 			if t.Stem == stem && t.Title != "" {
 				filename = sanitizeDownloadFilename(t.Title) + ".mp3"

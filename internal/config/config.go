@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -13,6 +14,8 @@ import (
 	"strings"
 	"sync"
 	"unicode/utf16"
+
+	"acetate/internal/album"
 )
 
 // Track represents a single track in the album.
@@ -146,6 +149,13 @@ func ScanAlbumTracks(albumPath string) ([]Track, error) {
 		}
 
 		stem := strings.TrimSuffix(name, filepath.Ext(name))
+		// Skip anything that could not be requested back: dotfiles such as macOS
+		// AppleDouble sidecars, and names whose edges the request path would trim.
+		if !album.ValidateStem(stem) || strings.TrimSpace(stem) != stem {
+			log.Printf("skipping unrequestable track file %q in %s", name, albumPath)
+			continue
+		}
+
 		title := deriveTitleFromMetadata(filepath.Join(albumPath, name), stem)
 		tracks = append(tracks, Track{Stem: stem, Title: title})
 	}

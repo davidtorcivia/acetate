@@ -3,14 +3,17 @@ package album
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"acetate/internal/albums"
 )
 
 func TestValidateStem(t *testing.T) {
-	valid := []string{"01-gathering", "track_name", "MyTrack", "a1b2c3", "track name", "Track (Live)"}
-	invalid := []string{"../etc/passwd", "track.mp3", "track/name", "", "track\x00name", ".", ".."}
+	valid := []string{"01-gathering", "track_name", "MyTrack", "a1b2c3", "track name", "Track (Live)",
+		"Don't Drink It, Then", "01. Intro", "Caf\u00e9", "Rock & Roll", "Track #1", "Track [Remix]", "Wait..."}
+	invalid := []string{"../etc/passwd", "track/name", "a/../b", "", "track\x00name", "x\ny", ".", "..", ".hidden",
+		"..\\etc\\passwd", "track\\name", "track\x7fname", strings.Repeat("a", 256), "Caf\xe9"}
 
 	for _, s := range valid {
 		if !ValidateStem(s) {

@@ -8,6 +8,7 @@ import (
 	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -273,7 +274,9 @@ func TestStreamTrackPathTraversal(t *testing.T) {
 	env := setupTest(t)
 	cookies := env.authenticate(t)
 
-	badStems := []string{"../etc/passwd", "track.mp3", "track/../../etc/passwd"}
+	// The percent-encoded form is the one that survives chi routing and actually
+	// reaches ValidateStem; the others are rejected earlier.
+	badStems := []string{"../etc/passwd", "track.mp3", "track/../../etc/passwd", "%2e%2e%2fetc%2fpasswd"}
 	for _, stem := range badStems {
 		req, _ := http.NewRequest("GET", env.ts.URL+"/api/albums/"+env.albumSlug+"/stream/"+stem, nil)
 		for _, c := range cookies {
@@ -1469,8 +1472,9 @@ func TestAdminAlbumCRUD(t *testing.T) {
 		t.Fatalf("expected 1 album, got %d", len(listResp.Albums))
 	}
 
-	// Create a new album
+	// Create a new album. The folder already holds an MP3, so creation must import it.
 	newAlbumDir := t.TempDir()
+	os.WriteFile(filepath.Join(newAlbumDir, "Don't Drink It, Then.mp3"), []byte("fake"), 0644)
 	createBody, _ := json.Marshal(map[string]string{
 		"title":      "New Album",
 		"artist":     "New Artist",
@@ -1497,6 +1501,20 @@ func TestAdminAlbumCRUD(t *testing.T) {
 		t.Fatalf("expected created album with ID and slug, got %+v", created)
 	}
 
+	tracksReq, _ := http.NewRequest("GET", env.ts.URL+"/admin/api/albums/"+strconv.FormatInt(created.ID, 10)+"/tracks", nil)
+	for _, c := range adminCookies {
+		tracksReq.AddCookie(c)
+	}
+	tracksResp, _ := env.ts.Client().Do(tracksReq)
+	var createdTracks []struct {
+		Stem string `json:"stem"`
+	}
+	json.NewDecoder(tracksResp.Body).Decode(&createdTracks)
+	tracksResp.Body.Close()
+	if len(createdTracks) != 1 || createdTracks[0].Stem != "Don't Drink It, Then" {
+		t.Fatalf("expected the on-disk track to be imported on create, got %+v", createdTracks)
+	}
+
 	// Delete the album
 	deleteReq, _ := http.NewRequest("DELETE", env.ts.URL+"/admin/api/albums/"+strconv.FormatInt(created.ID, 10), nil)
 	deleteReq.Header.Set("Origin", env.ts.URL)
@@ -1519,6 +1537,36 @@ func TestAdminAlbumCRUD(t *testing.T) {
 	resp2.Body.Close()
 	if len(listResp.Albums) != 1 {
 		t.Fatalf("expected 1 album after delete, got %d", len(listResp.Albums))
+	}
+}
+
+func TestStreamTrackWithPunctuationStem(t *testing.T) {
+	env := setupTest(t)
+	listenerCookies := env.authenticate(t)
+
+	const stem = "Don't Drink It, Then"
+	os.WriteFile(filepath.Join(env.albumDir, stem+".mp3"), []byte("fake-mp3-data-3"), 0644)
+
+	tracks, err := env.srv.albumStore.GetTracks(env.albumID)
+	if err != nil {
+		t.Fatalf("get tracks: %v", err)
+	}
+	tracks = append(tracks, albums.Track{Stem: stem, Title: "Don't Drink It, Then"})
+	if err := env.srv.albumStore.SetTracks(env.albumID, tracks); err != nil {
+		t.Fatalf("set tracks: %v", err)
+	}
+
+	req, _ := http.NewRequest(http.MethodGet, env.ts.URL+"/api/albums/"+env.albumSlug+"/stream/"+url.PathEscape(stem), nil)
+	for _, c := range listenerCookies {
+		req.AddCookie(c)
+	}
+	resp, err := env.ts.Client().Do(req)
+	if err != nil {
+		t.Fatalf("stream request: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("stream status = %d, want 200", resp.StatusCode)
 	}
 }
 

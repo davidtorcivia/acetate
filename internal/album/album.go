@@ -6,15 +6,13 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
-	"regexp"
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"acetate/internal/albums"
 )
-
-var stemRegexp = regexp.MustCompile(`^[a-zA-Z0-9 _'()\-]+$`)
 
 type TrackInfo struct {
 	Stem         string `json:"stem"`
@@ -23,11 +21,26 @@ type TrackInfo struct {
 	LyricFormat  string `json:"lyric_format,omitempty"`
 }
 
+// ValidateStem guards the path built from a stem; it deliberately allows any
+// other filename character, since stems come from real files on disk and the
+// callers separately check the stem against the album's track list.
 func ValidateStem(stem string) bool {
-	if stem == "" || strings.Contains(stem, "..") || strings.ContainsAny(stem, "/\\") {
+	// Invalid UTF-8 would be substituted on the way out through JSON, so the stem
+	// the client sends back would no longer match the one stored for the track.
+	if stem == "" || len(stem) > 255 || !utf8.ValidString(stem) {
 		return false
 	}
-	return stemRegexp.MatchString(stem)
+	// Rejecting separators keeps the stem a single path element, and rejecting a
+	// leading dot is then what stops that element from being ".." or ".".
+	if strings.ContainsAny(stem, "/\\") || strings.HasPrefix(stem, ".") {
+		return false
+	}
+	for _, r := range stem {
+		if r < 0x20 || r == 0x7f {
+			return false
+		}
+	}
+	return true
 }
 
 // StemInTracks checks if the stem exists in the given track list.

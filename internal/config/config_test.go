@@ -4,6 +4,7 @@ import (
 	"encoding/binary"
 	"os"
 	"path/filepath"
+	"reflect"
 	"testing"
 )
 
@@ -176,4 +177,30 @@ func makeID3v23TaggedMP3(title string) []byte {
 	data := append(header, frame...)
 	data = append(data, []byte{0x00, 0x00, 0x00, 0x00}...) // fake audio bytes
 	return data
+}
+
+func TestScanAlbumTracksSkipsUnrequestableNames(t *testing.T) {
+	dir := t.TempDir()
+	for _, name := range []string{"Real Track.mp3", "Wait....mp3"} {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte("fake"), 0644); err != nil {
+			t.Fatalf("write %q: %v", name, err)
+		}
+	}
+	// Some mounts refuse a non-UTF-8 name outright, which is just as good as skipping it.
+	for _, name := range []string{"._Real Track.mp3", ".hidden.mp3", ".mp3", "Intro .mp3", "Caf\xe9.mp3"} {
+		os.WriteFile(filepath.Join(dir, name), []byte("fake"), 0644)
+	}
+
+	tracks, err := ScanAlbumTracks(dir)
+	if err != nil {
+		t.Fatalf("scan: %v", err)
+	}
+	got := make([]string, 0, len(tracks))
+	for _, tr := range tracks {
+		got = append(got, tr.Stem)
+	}
+	want := []string{"Real Track", "Wait..."}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("stems = %q, want %q", got, want)
+	}
 }

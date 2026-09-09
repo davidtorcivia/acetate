@@ -8,6 +8,8 @@ import (
 	"strconv"
 	"strings"
 
+	"acetate/internal/config"
+
 	"github.com/go-chi/chi/v5"
 )
 
@@ -93,6 +95,14 @@ func (s *Server) handleAdminCreateAlbum(w http.ResponseWriter, r *http.Request) 
 		log.Printf("create album error: %v", err)
 		jsonError(w, "internal error", http.StatusInternalServerError)
 		return
+	}
+
+	// Import the tracks sitting in the folder. Best effort: a bad scan leaves the
+	// album empty and the admin can still use "Import Tracks from Disk".
+	if diskTracks, err := config.ScanAlbumTracks(alb.AlbumPath); err != nil {
+		log.Printf("scan tracks for album %d: %v", alb.ID, err)
+	} else if err := s.albumStore.SetTracks(alb.ID, configTracksToAlbumTracks(diskTracks)); err != nil {
+		log.Printf("set tracks for album %d: %v", alb.ID, err)
 	}
 
 	jsonCreated(w, alb)
