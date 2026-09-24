@@ -184,7 +184,7 @@
 
         // An errored element stays errored until it reloads; resume where it stopped.
         if (activeDeck.error && activeDeck.src) {
-            pendingSeekTime = activeDeck.currentTime || null;
+            pendingSeekTime = activeDeck.currentTime || pendingSeekTime;
             activeDeck.src = activeDeck.src;
             activeDeck.load();
         }

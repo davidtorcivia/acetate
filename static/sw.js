@@ -91,7 +91,7 @@ self.addEventListener("fetch", (event) => {
         return;
     }
 
-    // Audio: cache first when a full copy exists, otherwise network plus one background fill.
+    // Audio: network first, the cached full copy only when offline; one background fill per track.
     // Route shape: /api/albums/{slug}/stream/{stem}; downloads (?dl=1) bypass the worker.
     if (isAlbumStreamPath(path)) {
         if (!listenerAuthenticated || url.searchParams.has("dl")) return;
