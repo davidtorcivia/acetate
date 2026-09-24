@@ -57,9 +57,6 @@ func MigrateFromConfigJSON(db *sql.DB, dataPath, albumPath string) error {
 
 	// 1. Create album
 	slug := generateSlug(cfg.Title)
-	if slug == "" {
-		slug = "album"
-	}
 	res, err := tx.Exec(
 		"INSERT INTO albums (slug, title, artist, album_path) VALUES (?, ?, ?, ?)",
 		slug, cfg.Title, cfg.Artist, albumPath,
@@ -139,4 +136,35 @@ func isLikelyBcryptHash(v string) bool {
 		return false
 	}
 	return strings.HasPrefix(v, "$2a$") || strings.HasPrefix(v, "$2b$") || strings.HasPrefix(v, "$2y$")
+}
+
+// MigrateLegacyCover moves a single-album era dataPath/cover_override.jpg into
+// the per-album cover directory of the oldest album. Until an album exists the
+// file stays where it is.
+func MigrateLegacyCover(db *sql.DB, dataPath string) error {
+	legacy := filepath.Join(dataPath, "cover_override.jpg")
+	if _, err := os.Stat(legacy); err != nil {
+		return nil
+	}
+	var albumID sql.NullInt64
+	if err := db.QueryRow("SELECT MIN(id) FROM albums").Scan(&albumID); err != nil {
+		return fmt.Errorf("find album for legacy cover: %w", err)
+	}
+	if !albumID.Valid {
+		return nil
+	}
+
+	dest := filepath.Join(dataPath, "covers", fmt.Sprint(albumID.Int64), "cover_override.jpg")
+	if _, err := os.Stat(dest); err == nil {
+		// The album already has its own upload; keep the old file out of the way.
+		return os.Rename(legacy, legacy+".migrated")
+	}
+	if err := os.MkdirAll(filepath.Dir(dest), 0755); err != nil {
+		return err
+	}
+	if err := os.Rename(legacy, dest); err != nil {
+		return err
+	}
+	log.Printf("moved legacy cover_override.jpg to album %d", albumID.Int64)
+	return nil
 }

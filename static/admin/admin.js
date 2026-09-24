@@ -4,12 +4,20 @@
 
     var loginPanel, setupPanel, dashboard, loginForm, setupForm, usernameInput, passwordInput, loginError, passwordResetBanner;
     var trackMetaByStem = {};
-    var adminUsers = [];
     var currentAdminUser = '';
     var heatmapTooltipEl = null;
     var heatmapTooltipTarget = null;
     var selectedAlbumId = null;
     var albumsCache = [];
+    var albumsLoaded = false;
+    var passwordsCache = null;
+    var resetPending = false;
+    // Bumped on every album selection; responses carrying an older value are dropped.
+    var loadSeq = 0;
+    var reconcileReport = null;
+
+    var GATED_SECTIONS = ['section-albums', 'section-passwords', 'section-admin-users'];
+    var DETAIL_SECTIONS = ['section-album-settings', 'section-cover', 'section-tracks', 'section-analytics'];
 
     function init() {
         loginPanel = document.getElementById('admin-login');
@@ -31,6 +39,9 @@
         document.getElementById('btn-save-tracks').addEventListener('click', handleSaveTracks);
         document.getElementById('btn-reconcile-apply').addEventListener('click', handleReconcileApply);
         document.getElementById('admin-users-list').addEventListener('click', handleAdminUserAction);
+        document.getElementById('albums-list').addEventListener('click', handleAlbumListClick);
+        document.getElementById('passwords-list').addEventListener('click', handlePasswordListClick);
+        document.getElementById('track-list').addEventListener('click', handleTrackMove);
         document.getElementById('album-create-form').addEventListener('submit', handleCreateAlbum);
         document.getElementById('password-create-form').addEventListener('submit', handleCreatePassword);
 
@@ -40,34 +51,73 @@
         checkSetupStatus();
     }
 
+    // api sends a JSON request and resolves with the parsed body, or rejects with
+    // an Error carrying the server's message and HTTP status.
+    function api(method, url, body, keepSession) {
+        var opts = { method: method, credentials: 'same-origin', headers: { 'Accept': 'application/json' } };
+        if (body instanceof FormData) {
+            opts.body = body;
+        } else if (body !== undefined) {
+            opts.headers['Content-Type'] = 'application/json';
+            opts.body = JSON.stringify(body);
+        }
+        return fetch(url, opts).then(function (r) {
+            return r.text().then(function (text) {
+                var data = null;
+                try {
+                    data = text ? JSON.parse(text) : null;
+                } catch (e) {
+                    data = null;
+                }
+                if (r.ok) return data;
+
+                var msg = data && typeof data.error === 'string' ? data.error : (text || 'Request failed (' + r.status + ')');
+                // The login and change-password endpoints use 401 for wrong credentials.
+                if (r.status === 401 && !keepSession) {
+                    // Parallel requests all 401; only the first may reset the login form.
+                    if (loginPanel.classList.contains('hidden')) {
+                        showLogin(dashboard.classList.contains('hidden') ? '' : 'Your session expired. Please log in again.');
+                    }
+                } else if (r.status === 403 && msg === 'password reset required') {
+                    setPasswordResetMode(true);
+                }
+                var err = new Error(msg);
+                err.status = r.status;
+                throw err;
+            });
+        }, function () {
+            throw new Error('Connection error');
+        });
+    }
+
+    function albumUrl(albumId) {
+        return '/admin/api/albums/' + encodeURIComponent(String(albumId));
+    }
+
+    function showDashboardError(err) {
+        setStatus(document.getElementById('dashboard-status'), err.message, 'error');
+    }
+
     function handleDownloadsToggle() {
-        if (!selectedAlbumId) return;
+        var albumId = selectedAlbumId;
+        if (!albumId) return;
         var toggle = document.getElementById('downloads-enabled-toggle');
         var status = document.getElementById('album-settings-status');
         var enabled = toggle.checked;
         toggle.disabled = true;
 
-        fetch('/admin/api/albums/' + encodeURIComponent(String(selectedAlbumId)), {
-            method: 'PUT',
-            headers: { 'Content-Type': 'application/json' },
-            credentials: 'same-origin',
-            body: JSON.stringify({ downloads_enabled: enabled })
-        })
-            .then(function (r) {
-                if (r.ok) {
+        api('PUT', albumUrl(albumId), { downloads_enabled: enabled })
+            .then(function () {
+                var album = findAlbumById(albumId);
+                if (album) album.downloads_enabled = enabled;
+                if (albumId === selectedAlbumId) {
                     setStatus(status, 'Downloads ' + (enabled ? 'enabled' : 'disabled'), 'success');
-                    // Update cache
-                    var album = findAlbumById(selectedAlbumId);
-                    if (album) album.downloads_enabled = enabled;
-                    return;
                 }
-                return parseErrorResponse(r).then(function (msg) {
-                    throw new Error(msg || 'Failed to update setting');
-                });
             })
             .catch(function (err) {
+                if (albumId !== selectedAlbumId) return;
                 toggle.checked = !enabled;
-                setStatus(status, err.message || 'Failed to update setting', 'error');
+                setStatus(status, err.message, 'error');
             })
             .finally(function () {
                 toggle.disabled = false;
@@ -75,11 +125,7 @@
     }
 
     function checkSetupStatus() {
-        fetch('/admin/api/setup/status', { credentials: 'same-origin' })
-            .then(function (r) {
-                if (!r.ok) throw new Error('status');
-                return r.json();
-            })
+        api('GET', '/admin/api/setup/status')
             .then(function (data) {
                 if (data && data.needs_setup) {
                     showSetup();
@@ -93,55 +139,43 @@
     }
 
     function checkSession() {
-        fetch('/admin/api/config', { credentials: 'same-origin' })
-            .then(function (r) {
-                if (r.ok) {
-                    showDashboard();
-                } else {
-                    showLogin();
-                }
-            })
-            .catch(function () { showLogin(); });
+        loadConfig().then(showDashboard, function () { showLogin(); });
     }
 
     function handleSetup(e) {
         e.preventDefault();
+        var passwordEl = document.getElementById('setup-password');
+        var confirmEl = document.getElementById('setup-password-confirm');
         var username = document.getElementById('setup-username').value.trim();
-        var password = document.getElementById('setup-password').value;
-        var confirm = document.getElementById('setup-password-confirm').value;
+        var password = passwordEl.value;
+        var confirmPass = confirmEl.value;
         var setupError = document.getElementById('setup-error');
+        var submitBtn = e.target.querySelector('button[type="submit"]');
 
-        if (!username || !password || !confirm) return;
-        setupError.classList.add('hidden');
+        if (!username || !password || !confirmPass) return;
+        setStatus(setupError, '');
 
-        if (password !== confirm) {
-            setupError.textContent = 'Passwords do not match';
-            setupError.classList.remove('hidden');
+        if (password !== confirmPass) {
+            setStatus(setupError, 'Passwords do not match', 'error');
             return;
         }
 
-        fetch('/admin/api/setup', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            credentials: 'same-origin',
-            body: JSON.stringify({ username: username, password: password })
-        })
-            .then(function (r) {
-                if (r.ok) {
-                    showDashboard();
-                } else if (r.status === 409) {
-                    checkSession();
-                } else if (r.status === 400) {
-                    setupError.textContent = 'Invalid username or password policy not met';
-                    setupError.classList.remove('hidden');
-                } else {
-                    setupError.textContent = 'Setup failed';
-                    setupError.classList.remove('hidden');
-                }
+        submitBtn.disabled = true;
+        api('POST', '/admin/api/setup', { username: username, password: password })
+            .then(function () {
+                passwordEl.value = '';
+                confirmEl.value = '';
+                return loadConfig().then(showDashboard);
             })
-            .catch(function () {
-                setupError.textContent = 'Connection error';
-                setupError.classList.remove('hidden');
+            .catch(function (err) {
+                if (err.status === 409) {
+                    checkSession();
+                    return;
+                }
+                setStatus(setupError, err.message, 'error');
+            })
+            .finally(function () {
+                submitBtn.disabled = false;
             });
     }
 
@@ -149,50 +183,43 @@
         e.preventDefault();
         var username = usernameInput.value.trim();
         var password = passwordInput.value;
+        var submitBtn = e.target.querySelector('button[type="submit"]');
         if (!username || !password) return;
 
-        loginError.classList.add('hidden');
+        setStatus(loginError, '');
+        submitBtn.disabled = true;
 
-        fetch('/admin/api/auth', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            credentials: 'same-origin',
-            body: JSON.stringify({ username: username, password: password })
-        })
-            .then(function (r) {
-                if (r.ok) {
-                    return r.json();
-                }
-                return parseErrorResponse(r).then(function (msg) {
-                    loginError.textContent = msg || 'Invalid credentials';
-                    loginError.classList.remove('hidden');
-                    return null;
-                });
+        api('POST', '/admin/api/auth', { username: username, password: password }, true)
+            .then(function () {
+                return loadConfig().then(showDashboard);
             })
-            .then(function (payload) {
-                if (!payload) return;
-                showDashboard(!!payload.password_reset_required);
+            .catch(function (err) {
+                setStatus(loginError, err.status === 401 ? 'Invalid username or password' : err.message, 'error');
             })
-            .catch(function () {
-                loginError.textContent = 'Connection error';
-                loginError.classList.remove('hidden');
+            .finally(function () {
+                passwordInput.value = '';
+                submitBtn.disabled = false;
             });
     }
 
     function handleLogout() {
-        fetch('/admin/api/auth', {
-            method: 'DELETE',
-            credentials: 'same-origin'
-        }).then(function () { checkSetupStatus(); });
+        api('DELETE', '/admin/api/auth')
+            .then(function () { showLogin(); })
+            .catch(showDashboardError);
     }
 
-    function showLogin() {
+    function showLogin(message, type) {
         loginPanel.classList.remove('hidden');
         setupPanel.classList.add('hidden');
         dashboard.classList.add('hidden');
         hideHeatmapTooltip();
+        clearSelection();
+        albumsCache = [];
+        albumsLoaded = false;
+        passwordsCache = null;
         usernameInput.value = '';
         passwordInput.value = '';
+        setStatus(loginError, message || '', type || 'error');
         setPasswordResetMode(false);
         usernameInput.focus();
     }
@@ -205,73 +232,48 @@
         document.getElementById('setup-username').focus();
     }
 
-    function showDashboard(passwordResetRequired) {
+    function showDashboard(needsReset) {
         setupPanel.classList.add('hidden');
         loginPanel.classList.add('hidden');
         dashboard.classList.remove('hidden');
-        selectedAlbumId = null;
-        hideAlbumDetailSections();
-        if (passwordResetRequired) {
-            setPasswordResetMode(true);
+        clearSelection();
+        if (!needsReset) {
+            loadAlbums().then(loadPasswords);
+            loadAlbumFolders();
+            loadAdminUsers();
+        } else {
+            document.getElementById('admin-users-list').innerHTML = '';
+            document.getElementById('albums-list').innerHTML = '';
+            document.getElementById('passwords-list').innerHTML = '';
         }
-        loadConfig().then(function (needsReset) {
-            if (!needsReset) {
-                loadAlbums();
-                loadAlbumFolders();
-                loadPasswords();
-                loadAdminUsers();
-            } else {
-                clearAnalyticsTables();
-                document.getElementById('track-list').innerHTML = '';
-                document.getElementById('admin-users-list').innerHTML = '';
-                document.getElementById('albums-list').innerHTML = '';
-                document.getElementById('passwords-list').innerHTML = '';
-            }
-        });
     }
 
     function setPasswordResetMode(enabled) {
-        var gatedSections = ['section-albums', 'section-passwords', 'section-album-settings', 'section-cover', 'section-tracks', 'section-analytics', 'section-admin-users'];
-        gatedSections.forEach(function (id) {
-            var el = document.getElementById(id);
-            if (!el) return;
-            el.classList.toggle('hidden', !!enabled);
+        resetPending = !!enabled;
+        GATED_SECTIONS.forEach(function (id) {
+            document.getElementById(id).classList.toggle('hidden', resetPending);
         });
-        if (passwordResetBanner) {
-            passwordResetBanner.classList.toggle('hidden', !enabled);
-        }
+        updateDetailSections();
+        passwordResetBanner.classList.toggle('hidden', !resetPending);
     }
 
-    function hideAlbumDetailSections() {
-        ['section-album-settings', 'section-cover', 'section-tracks', 'section-analytics'].forEach(function (id) {
-            var el = document.getElementById(id);
-            if (el) el.classList.add('hidden');
+    function updateDetailSections() {
+        var show = !!selectedAlbumId && !resetPending;
+        DETAIL_SECTIONS.forEach(function (id) {
+            document.getElementById(id).classList.toggle('hidden', !show);
         });
     }
 
-    function showAlbumDetailSections() {
-        ['section-album-settings', 'section-cover', 'section-tracks', 'section-analytics'].forEach(function (id) {
-            var el = document.getElementById(id);
-            if (el) el.classList.remove('hidden');
-        });
-    }
-
-    function clearAnalyticsTables() {
-        var trackStats = document.getElementById('track-stats-body');
-        var sessions = document.getElementById('sessions-body');
-        if (trackStats) {
-            trackStats.innerHTML = '<tr><td colspan="6">Password reset required</td></tr>';
-        }
-        if (sessions) {
-            sessions.innerHTML = '<tr><td colspan="4">Password reset required</td></tr>';
-        }
+    function clearSelection() {
+        selectedAlbumId = null;
+        loadSeq++;
+        updateDetailSections();
     }
 
     function setupHeatmapTooltip() {
         if (heatmapTooltipEl) return;
 
         heatmapTooltipEl = document.createElement('div');
-        heatmapTooltipEl.id = 'heatmap-tooltip';
         heatmapTooltipEl.className = 'heatmap-tooltip hidden';
         document.body.appendChild(heatmapTooltipEl);
 
@@ -364,69 +366,43 @@
 
     function setStatus(el, message, type) {
         if (!el) return;
-        if (!message) {
-            el.textContent = '';
-            el.className = 'status hidden';
-            return;
-        }
-        el.textContent = message;
-        el.className = 'status ' + (type === 'error' ? 'error' : 'success');
-    }
-
-    function parseErrorResponse(response) {
-        return response.text().then(function (text) {
-            if (!text) return '';
-            try {
-                var payload = JSON.parse(text);
-                if (payload && typeof payload.error === 'string') {
-                    return payload.error;
-                }
-            } catch (e) {
-                // Ignore JSON parse errors and fall through to raw text.
-            }
-            return text;
-        });
+        el.textContent = message || '';
+        el.className = 'status' + (message ? (type === 'error' ? ' error' : ' success') : '');
     }
 
     // --- Config ---
     function loadConfig() {
-        return fetch('/admin/api/config', { credentials: 'same-origin' })
-            .then(function (r) {
-                if (!r.ok) throw new Error('unauthorized');
-                return r.json();
-            })
-            .then(function (data) {
-                currentAdminUser = data.admin_user || '';
-                document.getElementById('cfg-admin-user').textContent = currentAdminUser || '(unknown)';
-                document.getElementById('cfg-album-count').textContent = (data.album_count || 0) + ' albums';
-                document.getElementById('cfg-password-count').textContent = (data.password_count || 0) + ' passwords';
-                var needsReset = !!data.password_reset_required;
-                setPasswordResetMode(needsReset);
-                return needsReset;
-            })
-            .catch(function () {
-                showLogin();
-                return true;
-            });
+        return api('GET', '/admin/api/config').then(function (data) {
+            currentAdminUser = data.admin_user || '';
+            document.getElementById('cfg-admin-user').textContent = currentAdminUser || '(unknown)';
+            document.getElementById('cfg-album-count').textContent = (data.album_count || 0) + ' albums';
+            document.getElementById('cfg-password-count').textContent = (data.password_count || 0) + ' passwords';
+            var needsReset = !!data.password_reset_required;
+            setPasswordResetMode(needsReset);
+            return needsReset;
+        });
+    }
+
+    function refreshConfig() {
+        loadConfig().catch(showDashboardError);
     }
 
     // --- Albums ---
     function loadAlbumFolders() {
         var select = document.getElementById('new-album-path');
-        if (!select) return Promise.resolve();
 
-        return fetch('/admin/api/album-folders', { credentials: 'same-origin' })
-            .then(function (r) { return r.ok ? r.json() : { folders: [] }; })
+        return api('GET', '/admin/api/album-folders')
             .then(function (data) {
                 var folders = data && data.folders ? data.folders : [];
-                // Preserve the placeholder option, rebuild the rest
                 var html = '<option value="">Select album folder\u2026</option>';
                 folders.forEach(function (f) {
                     html += '<option value="' + escapeAttr(f) + '">' + escapeHtml(f) + '</option>';
                 });
                 select.innerHTML = html;
             })
-            .catch(function () {});
+            .catch(function (err) {
+                setStatus(document.getElementById('albums-status'), 'Unable to list album folders: ' + err.message, 'error');
+            });
     }
 
     function loadAlbums() {
@@ -435,87 +411,100 @@
 
         list.innerHTML = '<div class="empty-state">Loading albums...</div>';
 
-        return fetch('/admin/api/albums', { credentials: 'same-origin' })
-            .then(function (r) {
-                if (!r.ok) {
-                    return parseErrorResponse(r).then(function (msg) {
-                        throw new Error(msg || 'Failed to load albums');
-                    });
-                }
-                return r.json();
-            })
+        return api('GET', '/admin/api/albums')
             .then(function (payload) {
                 albumsCache = payload && payload.albums ? payload.albums : [];
-                renderAlbumsList(albumsCache);
-                setStatus(status, '', 'success');
-                // Re-render password album checkboxes whenever albums change
-                updatePasswordAlbumCheckboxes();
+                albumsLoaded = true;
+                if (selectedAlbumId && !findAlbumById(selectedAlbumId)) {
+                    clearSelection();
+                }
+                renderAlbumsList();
+                updateAlbumLabels();
             })
             .catch(function (err) {
                 albumsCache = [];
+                albumsLoaded = false;
                 list.innerHTML = '<div class="empty-state">Unable to load albums.</div>';
-                setStatus(status, err.message || 'Unable to load albums', 'error');
+                setStatus(status, err.message, 'error');
+            })
+            .then(function () {
+                updatePasswordAlbumCheckboxes();
+                renderPasswordsList();
             });
     }
 
-    function renderAlbumsList(albums) {
+    function renderAlbumsList() {
         var list = document.getElementById('albums-list');
-        if (!albums || !albums.length) {
+        if (!albumsCache.length) {
             list.innerHTML = '<div class="empty-state">No albums found. Create one below.</div>';
             return;
         }
 
-        var rows = albums.map(function (a) {
+        list.innerHTML = albumsCache.map(function (a) {
             var isSelected = selectedAlbumId === a.id;
+            var title = a.title || '(untitled)';
             return '' +
-                '<div class="track-item' + (isSelected ? ' dragging' : '') + '" data-album-id="' + Number(a.id) + '">' +
-                '<span class="track-stem" style="min-width:auto">' + escapeHtml(a.title || '(untitled)') + '</span>' +
-                '<span style="color:var(--muted);font-size:0.82rem">' + escapeHtml(a.artist || '') + '</span>' +
-                '<span style="color:var(--soft);font-size:0.78rem;margin-left:auto">' + Number(a.track_count || 0) + ' tracks</span>' +
-                '<button type="button" class="btn-small album-select-btn" data-album-id="' + Number(a.id) + '">' + (isSelected ? 'Selected' : 'Select') + '</button>' +
-                '<button type="button" class="btn-small album-delete-btn" data-album-id="' + Number(a.id) + '" data-album-title="' + escapeAttr(a.title || '') + '">Delete</button>' +
+                '<div class="list-row' + (isSelected ? ' is-selected' : '') + '" data-album-id="' + Number(a.id) + '">' +
+                '<span class="album-row-title">' + escapeHtml(title) + '</span>' +
+                '<span class="row-meta">' + escapeHtml(a.artist || '') + '</span>' +
+                '<span class="row-meta album-row-count">' + Number(a.track_count || 0) + ' tracks</span>' +
+                '<button type="button" class="btn-small album-select-btn" aria-label="' + escapeAttr((isSelected ? 'Selected: ' : 'Select ') + title) + '"' + (isSelected ? ' aria-pressed="true"' : '') + '>' + (isSelected ? 'Selected' : 'Select') + '</button>' +
+                '<button type="button" class="btn-small album-delete-btn" aria-label="' + escapeAttr('Delete album ' + title) + '">Delete</button>' +
                 '</div>';
         }).join('');
+    }
 
-        list.innerHTML = rows;
+    function handleAlbumListClick(e) {
+        var btn = e.target.closest('button');
+        var row = btn && btn.closest('[data-album-id]');
+        if (!row) return;
+        var albumId = Number(row.getAttribute('data-album-id'));
+        if (btn.classList.contains('album-select-btn')) {
+            selectAlbum(albumId);
+        } else if (btn.classList.contains('album-delete-btn')) {
+            handleDeleteAlbum(albumId, btn);
+        }
+    }
 
-        // Bind click events
-        list.querySelectorAll('.album-select-btn').forEach(function (btn) {
-            btn.addEventListener('click', function () {
-                var albumId = Number(btn.getAttribute('data-album-id'));
-                selectAlbum(albumId);
-            });
-        });
-        list.querySelectorAll('.album-delete-btn').forEach(function (btn) {
-            btn.addEventListener('click', function () {
-                var albumId = Number(btn.getAttribute('data-album-id'));
-                var albumTitle = btn.getAttribute('data-album-title') || 'this album';
-                handleDeleteAlbum(albumId, albumTitle);
-            });
+    function updateAlbumLabels() {
+        var album = findAlbumById(selectedAlbumId);
+        var label = album ? (album.title || 'Album #' + album.id) : '';
+        ['cover-album-label', 'tracks-album-label', 'analytics-album-label', 'settings-album-label'].forEach(function (id) {
+            document.getElementById(id).textContent = label ? '- ' + label : '';
         });
     }
 
     function selectAlbum(albumId) {
+        var seq = ++loadSeq;
         selectedAlbumId = albumId;
         var album = findAlbumById(albumId);
-        var label = album ? (album.title || 'Album #' + albumId) : 'Album #' + albumId;
 
-        // Update album-label spans
-        ['cover-album-label', 'tracks-album-label', 'analytics-album-label', 'settings-album-label'].forEach(function (id) {
-            var el = document.getElementById(id);
-            if (el) el.textContent = '- ' + label;
+        document.getElementById('downloads-enabled-toggle').checked = !!(album && album.downloads_enabled);
+        ['album-settings-status', 'cover-status', 'tracks-status'].forEach(function (id) {
+            setStatus(document.getElementById(id), '');
         });
+        document.getElementById('cover-file').value = '';
 
-        // Load album settings
-        var downloadsToggle = document.getElementById('downloads-enabled-toggle');
-        if (downloadsToggle && album) {
-            downloadsToggle.checked = !!album.downloads_enabled;
-        }
+        updateAlbumLabels();
+        updateDetailSections();
+        renderAlbumsList();
 
-        showAlbumDetailSections();
-        renderAlbumsList(albumsCache);
-        loadTracks(albumId);
-        loadAnalytics(albumId);
+        var section = document.getElementById('section-album-settings');
+        section.scrollIntoView({ behavior: 'smooth', block: 'start' });
+        section.querySelector('h2').focus({ preventScroll: true });
+
+        loadAlbumDetail(albumId, seq);
+    }
+
+    // Tracks load before analytics so the stats tables can show track titles.
+    function loadAlbumDetail(albumId, seq) {
+        loadTracks(albumId, seq).then(function () {
+            if (seq === loadSeq) loadAnalytics(albumId, seq);
+        });
+    }
+
+    function reloadSelected() {
+        if (selectedAlbumId) loadAlbumDetail(selectedAlbumId, ++loadSeq);
     }
 
     function findAlbumById(id) {
@@ -544,61 +533,43 @@
 
         submitBtn.disabled = true;
 
-        fetch('/admin/api/albums', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            credentials: 'same-origin',
-            body: JSON.stringify({ title: title, artist: artist, album_path: albumPath })
-        })
-            .then(function (r) {
-                if (r.ok) {
-                    return r.json().then(function () {
-                        titleEl.value = '';
-                        artistEl.value = '';
-                        pathEl.selectedIndex = 0;
-                        setStatus(status, 'Album created', 'success');
-                        loadAlbums();
-                        loadAlbumFolders();
-                        loadConfig();
-                    });
-                }
-                return parseErrorResponse(r).then(function (msg) {
-                    throw new Error(msg || 'Failed to create album');
-                });
+        api('POST', '/admin/api/albums', { title: title, artist: artist, album_path: albumPath })
+            .then(function () {
+                titleEl.value = '';
+                artistEl.value = '';
+                pathEl.selectedIndex = 0;
+                setStatus(status, 'Album created', 'success');
+                loadAlbums();
+                loadAlbumFolders();
+                refreshConfig();
             })
             .catch(function (err) {
-                setStatus(status, err.message || 'Failed to create album', 'error');
+                setStatus(status, err.message, 'error');
             })
             .finally(function () {
                 submitBtn.disabled = false;
             });
     }
 
-    function handleDeleteAlbum(albumId, albumTitle) {
+    function handleDeleteAlbum(albumId, btn) {
+        var album = findAlbumById(albumId);
+        var albumTitle = album && album.title ? album.title : 'this album';
         if (!confirm('Delete album "' + albumTitle + '"? This cannot be undone.')) return;
         var status = document.getElementById('albums-status');
+        btn.disabled = true;
 
-        fetch('/admin/api/albums/' + encodeURIComponent(String(albumId)), {
-            method: 'DELETE',
-            credentials: 'same-origin'
-        })
-            .then(function (r) {
-                if (r.ok) {
-                    setStatus(status, 'Album deleted', 'success');
-                    if (selectedAlbumId === albumId) {
-                        selectedAlbumId = null;
-                        hideAlbumDetailSections();
-                    }
-                    loadAlbums();
-                    loadConfig();
-                    return;
+        api('DELETE', albumUrl(albumId))
+            .then(function () {
+                setStatus(status, 'Album deleted', 'success');
+                if (selectedAlbumId === albumId) {
+                    clearSelection();
                 }
-                return parseErrorResponse(r).then(function (msg) {
-                    setStatus(status, msg || 'Failed to delete album', 'error');
-                });
+                loadAlbums();
+                refreshConfig();
             })
-            .catch(function () {
-                setStatus(status, 'Failed to delete album', 'error');
+            .catch(function (err) {
+                btn.disabled = false;
+                setStatus(status, err.message, 'error');
             });
     }
 
@@ -607,91 +578,84 @@
         var list = document.getElementById('passwords-list');
         var status = document.getElementById('passwords-status');
 
-        list.innerHTML = '<div class="empty-state">Loading passwords...</div>';
+        if (passwordsCache === null) {
+            list.innerHTML = '<div class="empty-state">Loading passwords...</div>';
+        }
 
-        return fetch('/admin/api/passwords', { credentials: 'same-origin' })
-            .then(function (r) {
-                if (!r.ok) {
-                    return parseErrorResponse(r).then(function (msg) {
-                        throw new Error(msg || 'Failed to load passwords');
-                    });
-                }
-                return r.json();
-            })
+        return api('GET', '/admin/api/passwords')
             .then(function (payload) {
-                var passwords = payload && payload.passwords ? payload.passwords : [];
-                renderPasswordsList(passwords);
-                setStatus(status, '', 'success');
+                passwordsCache = payload && payload.passwords ? payload.passwords : [];
+                renderPasswordsList();
             })
             .catch(function (err) {
                 list.innerHTML = '<div class="empty-state">Unable to load passwords.</div>';
-                setStatus(status, err.message || 'Unable to load passwords', 'error');
+                setStatus(status, err.message, 'error');
             });
     }
 
-    function renderPasswordsList(passwords) {
+    function findPasswordById(id) {
+        for (var i = 0; i < (passwordsCache || []).length; i++) {
+            if (passwordsCache[i].id === id) return passwordsCache[i];
+        }
+        return null;
+    }
+
+    function albumCheckboxesHtml(cbClass, checkedIds) {
+        return albumsCache.map(function (a) {
+            var checked = checkedIds.indexOf(a.id) !== -1;
+            return '<label class="checkbox-label">' +
+                '<input type="checkbox" class="' + cbClass + '" data-album-id="' + Number(a.id) + '"' + (checked ? ' checked' : '') + '>' +
+                escapeHtml(a.title || 'Album #' + a.id) +
+                '</label>';
+        }).join('');
+    }
+
+    function renderPasswordsList() {
         var list = document.getElementById('passwords-list');
-        if (!passwords || !passwords.length) {
+        if (passwordsCache === null) return;
+        if (!passwordsCache.length) {
             list.innerHTML = '<div class="empty-state">No listening passwords. Create one below.</div>';
             return;
         }
 
-        var rows = passwords.map(function (p) {
-            var albumCheckboxes = albumsCache.map(function (a) {
-                var checked = p.album_ids && p.album_ids.indexOf(a.id) !== -1;
-                return '<label class="checkbox-label" style="margin:2px 4px 2px 0">' +
-                    '<input type="checkbox" class="pw-album-cb" data-album-id="' + Number(a.id) + '"' + (checked ? ' checked' : '') + '>' +
-                    escapeHtml(a.title || 'Album #' + a.id) +
-                    '</label>';
-            }).join('');
-
+        var albumsNote = albumsLoaded ? 'No albums yet' : 'Albums unavailable; reload the page before saving';
+        list.innerHTML = passwordsCache.map(function (p) {
+            var label = p.label || '';
             return '' +
-                '<div class="track-item" style="flex-wrap:wrap" data-password-id="' + Number(p.id) + '">' +
-                '<input type="text" class="pw-label-input" value="' + escapeAttr(p.label || '') + '" placeholder="Label" style="min-width:120px">' +
-                '<input type="password" class="pw-passphrase-input" value="" placeholder="New passphrase (leave blank to keep)" style="min-width:140px">' +
-                '<div style="display:flex;flex-wrap:wrap;align-items:center;gap:2px;width:100%">' +
-                '<span style="color:var(--soft);font-size:0.78rem;margin-right:6px">Albums:</span>' +
-                albumCheckboxes +
+                '<div class="list-row password-row" data-password-id="' + Number(p.id) + '">' +
+                '<input type="text" class="pw-label-input" value="' + escapeAttr(label) + '" placeholder="Label" aria-label="' + escapeAttr('Label for password ' + label) + '" required>' +
+                '<input type="password" class="pw-passphrase-input" value="" placeholder="New passphrase (leave blank to keep)" aria-label="' + escapeAttr('New passphrase for ' + label) + '" autocomplete="new-password">' +
+                '<div class="checkbox-grid">' +
+                '<span class="muted-note">Albums:</span>' +
+                (albumsCache.length ? albumCheckboxesHtml('pw-album-cb', p.album_ids || []) : '<span class="muted-note">' + albumsNote + '</span>') +
                 '</div>' +
-                '<button type="button" class="btn-small pw-save-btn" data-password-id="' + Number(p.id) + '">Save</button>' +
-                '<button type="button" class="btn-small pw-delete-btn" data-password-id="' + Number(p.id) + '" data-password-label="' + escapeAttr(p.label || '') + '">Delete</button>' +
+                '<button type="button" class="btn-small pw-save-btn" aria-label="' + escapeAttr('Save password ' + label) + '"' + (albumsLoaded ? '' : ' disabled') + '>Save</button>' +
+                '<button type="button" class="btn-small pw-delete-btn" aria-label="' + escapeAttr('Delete password ' + label) + '">Delete</button>' +
                 '</div>';
         }).join('');
+    }
 
-        list.innerHTML = rows;
-
-        // Bind events
-        list.querySelectorAll('.pw-save-btn').forEach(function (btn) {
-            btn.addEventListener('click', function () {
-                var pwId = Number(btn.getAttribute('data-password-id'));
-                handleUpdatePassword(pwId, btn);
-            });
-        });
-        list.querySelectorAll('.pw-delete-btn').forEach(function (btn) {
-            btn.addEventListener('click', function () {
-                var pwId = Number(btn.getAttribute('data-password-id'));
-                var label = btn.getAttribute('data-password-label') || 'this password';
-                handleDeletePassword(pwId, label);
-            });
-        });
+    function handlePasswordListClick(e) {
+        var btn = e.target.closest('button');
+        var row = btn && btn.closest('[data-password-id]');
+        if (!row) return;
+        var pwId = Number(row.getAttribute('data-password-id'));
+        if (btn.classList.contains('pw-save-btn')) {
+            handleUpdatePassword(pwId, row, btn);
+        } else if (btn.classList.contains('pw-delete-btn')) {
+            handleDeletePassword(pwId, btn);
+        }
     }
 
     function updatePasswordAlbumCheckboxes() {
         var container = document.getElementById('password-album-checkboxes');
-        if (!container) return;
 
         if (!albumsCache.length) {
-            container.innerHTML = '<span style="color:var(--soft);font-size:0.78rem">No albums yet - create an album first</span>';
+            container.innerHTML = '<span class="muted-note">' + (albumsLoaded ? 'No albums yet. Create an album first.' : 'Albums unavailable.') + '</span>';
             return;
         }
 
-        container.innerHTML = '<span style="color:var(--soft);font-size:0.78rem;margin-right:6px">Link to albums:</span>' +
-            albumsCache.map(function (a) {
-                return '<label class="checkbox-label" style="margin:2px 4px 2px 0">' +
-                    '<input type="checkbox" class="new-pw-album-cb" data-album-id="' + Number(a.id) + '">' +
-                    escapeHtml(a.title || 'Album #' + a.id) +
-                    '</label>';
-            }).join('');
+        container.innerHTML = '<span class="muted-note">Link to albums:</span>' + albumCheckboxesHtml('new-pw-album-cb', []);
     }
 
     function handleCreatePassword(e) {
@@ -714,144 +678,122 @@
             albumIds.push(Number(cb.getAttribute('data-album-id')));
         });
 
+        if (!albumIds.length && !confirm('No albums selected. This password will not unlock anything until you link an album. Create it anyway?')) {
+            return;
+        }
+
         submitBtn.disabled = true;
 
-        fetch('/admin/api/passwords', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            credentials: 'same-origin',
-            body: JSON.stringify({ label: label, passphrase: passphrase, album_ids: albumIds })
-        })
-            .then(function (r) {
-                if (r.ok) {
-                    return r.json().then(function () {
-                        labelEl.value = '';
-                        passphraseEl.value = '';
-                        document.querySelectorAll('.new-pw-album-cb').forEach(function (cb) { cb.checked = false; });
-                        setStatus(status, 'Password created', 'success');
-                        loadPasswords();
-                        loadConfig();
-                    });
-                }
-                return parseErrorResponse(r).then(function (msg) {
-                    throw new Error(msg || 'Failed to create password');
-                });
+        api('POST', '/admin/api/passwords', { label: label, passphrase: passphrase, album_ids: albumIds })
+            .then(function () {
+                labelEl.value = '';
+                passphraseEl.value = '';
+                document.querySelectorAll('.new-pw-album-cb').forEach(function (cb) { cb.checked = false; });
+                setStatus(status, 'Password created', 'success');
+                loadPasswords();
+                refreshConfig();
             })
             .catch(function (err) {
-                setStatus(status, err.message || 'Failed to create password', 'error');
+                setStatus(status, err.message, 'error');
             })
             .finally(function () {
                 submitBtn.disabled = false;
             });
     }
 
-    function handleUpdatePassword(pwId, btn) {
-        var row = btn.closest('[data-password-id]');
-        if (!row) return;
-
+    function handleUpdatePassword(pwId, row, btn) {
         var status = document.getElementById('passwords-status');
-        var labelInput = row.querySelector('.pw-label-input');
         var passphraseInput = row.querySelector('.pw-passphrase-input');
-        var label = labelInput ? labelInput.value.trim() : '';
-        var passphrase = passphraseInput ? passphraseInput.value : '';
+        var label = row.querySelector('.pw-label-input').value.trim();
+        var passphrase = passphraseInput.value;
 
         if (!label) {
             setStatus(status, 'Label is required', 'error');
             return;
         }
 
-        var albumIds = [];
-        row.querySelectorAll('.pw-album-cb:checked').forEach(function (cb) {
-            albumIds.push(Number(cb.getAttribute('data-album-id')));
-        });
-
-        var body = { label: label, album_ids: albumIds };
+        var body = { label: label };
+        // An absent album_ids keeps the server's links; an empty array removes them all.
+        if (albumsLoaded) {
+            body.album_ids = [];
+            row.querySelectorAll('.pw-album-cb:checked').forEach(function (cb) {
+                body.album_ids.push(Number(cb.getAttribute('data-album-id')));
+            });
+        }
         if (passphrase) {
             body.passphrase = passphrase;
         }
 
         btn.disabled = true;
 
-        fetch('/admin/api/passwords/' + encodeURIComponent(String(pwId)), {
-            method: 'PUT',
-            headers: { 'Content-Type': 'application/json' },
-            credentials: 'same-origin',
-            body: JSON.stringify(body)
-        })
-            .then(function (r) {
-                if (r.ok) {
-                    setStatus(status, 'Password updated', 'success');
-                    loadPasswords();
-                    return;
+        api('PUT', '/admin/api/passwords/' + encodeURIComponent(String(pwId)), body)
+            .then(function () {
+                var cached = findPasswordById(pwId);
+                if (cached) {
+                    cached.label = label;
+                    if (body.album_ids) cached.album_ids = body.album_ids;
                 }
-                return parseErrorResponse(r).then(function (msg) {
-                    throw new Error(msg || 'Failed to update password');
-                });
+                passphraseInput.value = '';
+                setStatus(status, 'Password "' + label + '" updated', 'success');
             })
             .catch(function (err) {
-                setStatus(status, err.message || 'Failed to update password', 'error');
+                setStatus(status, err.message, 'error');
             })
             .finally(function () {
-                btn.disabled = false;
+                btn.disabled = !albumsLoaded;
             });
     }
 
-    function handleDeletePassword(pwId, label) {
+    function handleDeletePassword(pwId, btn) {
+        var pw = findPasswordById(pwId);
+        var label = pw && pw.label ? pw.label : 'this password';
         if (!confirm('Delete password "' + label + '"? This cannot be undone.')) return;
         var status = document.getElementById('passwords-status');
+        btn.disabled = true;
 
-        fetch('/admin/api/passwords/' + encodeURIComponent(String(pwId)), {
-            method: 'DELETE',
-            credentials: 'same-origin'
-        })
-            .then(function (r) {
-                if (r.ok) {
-                    setStatus(status, 'Password deleted', 'success');
-                    loadPasswords();
-                    loadConfig();
-                    return;
-                }
-                return parseErrorResponse(r).then(function (msg) {
-                    setStatus(status, msg || 'Failed to delete password', 'error');
-                });
+        api('DELETE', '/admin/api/passwords/' + encodeURIComponent(String(pwId)))
+            .then(function () {
+                setStatus(status, 'Password deleted', 'success');
+                loadPasswords();
+                refreshConfig();
             })
-            .catch(function () {
-                setStatus(status, 'Failed to delete password', 'error');
+            .catch(function (err) {
+                btn.disabled = false;
+                setStatus(status, err.message, 'error');
             });
     }
 
     // --- Admin Password ---
     function handleAdminPasswordUpdate(e) {
         e.preventDefault();
-        var currentPass = document.getElementById('current-admin-password').value;
-        var newPass = document.getElementById('new-admin-password').value;
+        var currentEl = document.getElementById('current-admin-password');
+        var newEl = document.getElementById('new-admin-password');
+        var confirmEl = document.getElementById('confirm-admin-password');
         var status = document.getElementById('admin-password-status');
+        var submitBtn = e.target.querySelector('button[type="submit"]');
 
-        if (!currentPass || !newPass) return;
+        if (!currentEl.value || !newEl.value) return;
+        if (newEl.value !== confirmEl.value) {
+            setStatus(status, 'New passwords do not match', 'error');
+            return;
+        }
 
-        fetch('/admin/api/admin-password', {
-            method: 'PUT',
-            headers: { 'Content-Type': 'application/json' },
-            credentials: 'same-origin',
-            body: JSON.stringify({
-                current_password: currentPass,
-                new_password: newPass
+        submitBtn.disabled = true;
+        api('PUT', '/admin/api/admin-password', {
+            current_password: currentEl.value,
+            new_password: newEl.value
+        }, true)
+            .then(function () {
+                currentEl.value = '';
+                newEl.value = '';
+                confirmEl.value = '';
+                showLogin('Admin password updated. Please log in again.', 'success');
             })
-        })
-            .then(function (r) {
-                if (r.ok) {
-                    setStatus(status, 'Admin password updated. Please log in again.', 'success');
-                    document.getElementById('current-admin-password').value = '';
-                    document.getElementById('new-admin-password').value = '';
-                    setTimeout(showLogin, 500);
-                    return;
-                }
-                return parseErrorResponse(r).then(function (msg) {
-                    setStatus(status, msg || 'Failed to update admin password', 'error');
-                });
+            .catch(function (err) {
+                setStatus(status, err.status === 401 ? 'Current password is incorrect' : err.message, 'error');
             })
-            .catch(function () {
-                setStatus(status, 'Failed to update admin password', 'error');
+            .finally(function () {
+                submitBtn.disabled = false;
             });
     }
 
@@ -862,24 +804,13 @@
 
         list.innerHTML = '<div class="empty-state">Loading admin users...</div>';
 
-        return fetch('/admin/api/admin-users', { credentials: 'same-origin' })
-            .then(function (r) {
-                if (!r.ok) {
-                    return parseErrorResponse(r).then(function (msg) {
-                        throw new Error(msg || 'Failed to load admin users');
-                    });
-                }
-                return r.json();
-            })
+        return api('GET', '/admin/api/admin-users')
             .then(function (payload) {
-                adminUsers = payload && payload.users ? payload.users : [];
-                renderAdminUsers(adminUsers);
-                setStatus(status, '', 'success');
+                renderAdminUsers(payload && payload.users ? payload.users : []);
             })
             .catch(function (err) {
-                adminUsers = [];
                 list.innerHTML = '<div class="empty-state">Unable to load admin users.</div>';
-                setStatus(status, err.message || 'Unable to load admin users', 'error');
+                setStatus(status, err.message, 'error');
             });
     }
 
@@ -897,58 +828,8 @@
             return String(a.username || '').localeCompare(String(b.username || ''));
         });
 
-        var rows = sorted.map(function (u) {
-            var username = String(u.username || '');
-            var isSelf = currentAdminUser && username.toLowerCase() === currentAdminUser.toLowerCase();
-            var disableActive = !!u.is_founder || !!isSelf;
-            var badges = '';
-            if (u.is_founder) {
-                badges += '<span class="admin-badge founder">Original</span>';
-            }
-            if (isSelf) {
-                badges += '<span class="admin-badge self">You</span>';
-            }
-            if (!u.is_active) {
-                badges += '<span class="admin-badge inactive">Inactive</span>';
-            }
-
-            var disableHint = '';
-            if (u.is_founder) {
-                disableHint = 'Original admin cannot be deactivated';
-            } else if (isSelf) {
-                disableHint = 'You cannot deactivate your own account';
-            }
-
-            return '' +
-                '<tr class="admin-user-row ' + (u.is_active ? '' : 'is-inactive') + '" data-user-id="' + Number(u.id) + '">' +
-                '<td>' +
-                '<input type="text" class="admin-user-username" value="' + escapeAttr(username) + '" autocomplete="off">' +
-                '</td>' +
-                '<td>' +
-                '<div class="admin-badges">' + (badges || '<span class="admin-badge standard">Standard</span>') + '</div>' +
-                (disableHint ? '<div class="inline-note">' + escapeHtml(disableHint) + '</div>' : '') +
-                '</td>' +
-                '<td>' +
-                '<label class="switch-label">' +
-                '<input type="checkbox" class="admin-user-active" ' + (u.is_active ? 'checked' : '') + (disableActive ? ' disabled' : '') + '>' +
-                '<span>Active</span>' +
-                '</label>' +
-                '</td>' +
-                '<td>' +
-                '<label class="switch-label">' +
-                '<input type="checkbox" class="admin-user-reset" ' + (u.require_password_reset ? 'checked' : '') + '>' +
-                '<span>Force reset</span>' +
-                '</label>' +
-                '</td>' +
-                '<td>' + escapeHtml(formatDateTime(u.last_login_at) || 'Never') + '</td>' +
-                '<td>' +
-                '<button type="button" class="btn-small admin-user-save" data-user-id="' + Number(u.id) + '">Save</button>' +
-                '</td>' +
-                '</tr>';
-        }).join('');
-
         list.innerHTML = '' +
-            '<div class="admin-users-table-wrap">' +
+            '<div class="table-wrap admin-users-table-wrap">' +
             '<table class="data-table admin-users-table">' +
             '<thead>' +
             '<tr>' +
@@ -960,9 +841,59 @@
             '<th>Action</th>' +
             '</tr>' +
             '</thead>' +
-            '<tbody>' + rows + '</tbody>' +
+            '<tbody>' + sorted.map(adminUserRowHtml).join('') + '</tbody>' +
             '</table>' +
             '</div>';
+    }
+
+    function adminUserRowHtml(u) {
+        var username = String(u.username || '');
+        var isSelf = currentAdminUser && username.toLowerCase() === currentAdminUser.toLowerCase();
+        var disableActive = !!u.is_founder || !!isSelf;
+        var badges = '';
+        if (u.is_founder) {
+            badges += '<span class="admin-badge founder">Original</span>';
+        }
+        if (isSelf) {
+            badges += '<span class="admin-badge self">You</span>';
+        }
+        if (!u.is_active) {
+            badges += '<span class="admin-badge inactive">Inactive</span>';
+        }
+
+        var disableHint = '';
+        if (u.is_founder) {
+            disableHint = 'Original admin cannot be deactivated';
+        } else if (isSelf) {
+            disableHint = 'You cannot deactivate your own account';
+        }
+
+        return '' +
+            '<tr class="admin-user-row ' + (u.is_active ? '' : 'is-inactive') + '" data-user-id="' + Number(u.id) + '">' +
+            '<td>' +
+            '<input type="text" class="admin-user-username" value="' + escapeAttr(username) + '" aria-label="' + escapeAttr('Username for ' + username) + '" autocomplete="off" required>' +
+            '</td>' +
+            '<td>' +
+            '<div class="admin-badges">' + (badges || '<span class="admin-badge standard">Standard</span>') + '</div>' +
+            (disableHint ? '<div class="inline-note">' + escapeHtml(disableHint) + '</div>' : '') +
+            '</td>' +
+            '<td>' +
+            '<label class="switch-label">' +
+            '<input type="checkbox" class="admin-user-active" ' + (u.is_active ? 'checked' : '') + (disableActive ? ' disabled' : '') + '>' +
+            '<span>Active</span>' +
+            '</label>' +
+            '</td>' +
+            '<td>' +
+            '<label class="switch-label">' +
+            '<input type="checkbox" class="admin-user-reset" ' + (u.require_password_reset ? 'checked' : '') + '>' +
+            '<span>Force reset</span>' +
+            '</label>' +
+            '</td>' +
+            '<td>' + escapeHtml(formatDateTime(u.last_login_at) || 'Never') + '</td>' +
+            '<td>' +
+            '<button type="button" class="btn-small admin-user-save" aria-label="' + escapeAttr('Save admin user ' + username) + '">Save</button>' +
+            '</td>' +
+            '</tr>';
     }
 
     function handleCreateAdminUser(e) {
@@ -985,32 +916,20 @@
 
         submitBtn.disabled = true;
 
-        fetch('/admin/api/admin-users', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            credentials: 'same-origin',
-            body: JSON.stringify({
-                username: username,
-                password: password,
-                require_password_reset: requirePasswordReset
-            })
+        api('POST', '/admin/api/admin-users', {
+            username: username,
+            password: password,
+            require_password_reset: requirePasswordReset
         })
-            .then(function (r) {
-                if (r.ok) {
-                    return r.json().then(function () {
-                        usernameEl.value = '';
-                        passwordEl.value = '';
-                        forceResetEl.checked = true;
-                        setStatus(status, 'Admin user created', 'success');
-                        return loadAdminUsers();
-                    });
-                }
-                return parseErrorResponse(r).then(function (msg) {
-                    throw new Error(msg || 'Failed to create admin user');
-                });
+            .then(function () {
+                usernameEl.value = '';
+                passwordEl.value = '';
+                forceResetEl.checked = true;
+                setStatus(status, 'Admin user created', 'success');
+                return loadAdminUsers();
             })
             .catch(function (err) {
-                setStatus(status, err.message || 'Failed to create admin user', 'error');
+                setStatus(status, err.message, 'error');
             })
             .finally(function () {
                 submitBtn.disabled = false;
@@ -1026,7 +945,7 @@
         var row = target.closest('tr.admin-user-row');
         if (!row) return;
 
-        var userID = Number(row.getAttribute('data-user-id') || target.getAttribute('data-user-id') || 0);
+        var userID = Number(row.getAttribute('data-user-id') || 0);
         var usernameEl = row.querySelector('.admin-user-username');
         var activeEl = row.querySelector('.admin-user-active');
         var resetEl = row.querySelector('.admin-user-reset');
@@ -1043,31 +962,22 @@
 
         target.disabled = true;
 
-        fetch('/admin/api/admin-users/' + encodeURIComponent(String(userID)), {
-            method: 'PUT',
-            headers: { 'Content-Type': 'application/json' },
-            credentials: 'same-origin',
-            body: JSON.stringify({
-                username: username,
-                is_active: isActive,
-                require_password_reset: requireReset
-            })
+        api('PUT', '/admin/api/admin-users/' + encodeURIComponent(String(userID)), {
+            username: username,
+            is_active: isActive,
+            require_password_reset: requireReset
         })
-            .then(function (r) {
-                if (r.ok) {
-                    setStatus(status, 'Admin user updated', 'success');
-                    return loadConfig().then(function (needsReset) {
-                        if (!needsReset) {
-                            return loadAdminUsers();
-                        }
-                    });
-                }
-                return parseErrorResponse(r).then(function (msg) {
-                    throw new Error(msg || 'Failed to update admin user');
+            .then(function (user) {
+                setStatus(status, 'Admin user updated', 'success');
+                // Loaded first: renaming yourself changes which row shows the "You" badge.
+                return loadConfig().then(function (needsReset) {
+                    if (!needsReset && user && row.parentNode) {
+                        row.outerHTML = adminUserRowHtml(user);
+                    }
                 });
             })
             .catch(function (err) {
-                setStatus(status, err.message || 'Failed to update admin user', 'error');
+                setStatus(status, err.message, 'error');
             })
             .finally(function () {
                 target.disabled = false;
@@ -1077,10 +987,12 @@
     // --- Cover ---
     function handleCoverUpload(e) {
         e.preventDefault();
+        var albumId = selectedAlbumId;
         var fileInput = document.getElementById('cover-file');
         var status = document.getElementById('cover-status');
+        var submitBtn = e.target.querySelector('button[type="submit"]');
 
-        if (!selectedAlbumId) {
+        if (!albumId) {
             setStatus(status, 'No album selected', 'error');
             return;
         }
@@ -1090,131 +1002,139 @@
         var formData = new FormData();
         formData.append('cover', fileInput.files[0]);
 
-        fetch('/admin/api/albums/' + encodeURIComponent(String(selectedAlbumId)) + '/cover', {
-            method: 'POST',
-            credentials: 'same-origin',
-            body: formData
-        })
-            .then(function (r) {
-                if (r.ok) {
-                    setStatus(status, 'Cover uploaded', 'success');
-                    fileInput.value = '';
-                    return;
-                }
-                return parseErrorResponse(r).then(function (msg) {
-                    setStatus(status, msg || 'Upload failed', 'error');
-                });
+        submitBtn.disabled = true;
+        setStatus(status, 'Uploading...', 'success');
+
+        api('POST', albumUrl(albumId) + '/cover', formData)
+            .then(function () {
+                if (albumId !== selectedAlbumId) return;
+                setStatus(status, 'Cover uploaded', 'success');
+                fileInput.value = '';
             })
-            .catch(function () {
-                setStatus(status, 'Upload failed', 'error');
+            .catch(function (err) {
+                if (albumId !== selectedAlbumId) return;
+                setStatus(status, err.message, 'error');
+            })
+            .finally(function () {
+                submitBtn.disabled = false;
             });
     }
 
     // --- Tracks ---
-    var currentTracks = [];
+    function loadTracks(albumId, seq) {
+        var saveBtn = document.getElementById('btn-save-tracks');
+        var status = document.getElementById('tracks-status');
 
-    function loadTracks(albumId) {
         trackMetaByStem = {};
+        reconcileReport = null;
         hideReconcileBar();
-        if (!albumId) return Promise.resolve();
+        saveBtn.disabled = true;
+        document.getElementById('track-list').innerHTML = '<div class="empty-state">Loading tracks...</div>';
+        document.getElementById('album-title').value = '';
+        document.getElementById('album-artist').value = '';
 
-        return fetch('/admin/api/albums/' + encodeURIComponent(String(albumId)) + '/tracks', { credentials: 'same-origin' })
-            .then(function (r) {
-                if (!r.ok) {
-                    throw new Error('tracks');
-                }
-                return r.json();
-            })
-            .then(function (tracks) {
-                currentTracks = tracks;
-                tracks.forEach(function (track) {
-                    trackMetaByStem[track.stem] = {
-                        title: track.title || '',
-                        duration: Number(track.duration || 0)
-                    };
-                });
+        return Promise.all([
+            api('GET', albumUrl(albumId) + '/tracks'),
+            api('GET', albumUrl(albumId))
+        ])
+            .then(function (results) {
+                if (seq !== loadSeq) return;
+                var tracks = results[0] || [];
+                var album = results[1] || {};
+                setTrackMeta(tracks);
                 renderTrackList(tracks);
-                // Load album title/artist into the track meta form
-                return fetch('/admin/api/albums/' + encodeURIComponent(String(albumId)), { credentials: 'same-origin' })
-                    .then(function (r) {
-                        if (!r.ok) {
-                            throw new Error('album');
-                        }
-                        return r.json();
-                    })
-                    .then(function (album) {
-                        document.getElementById('album-title').value = album.title || '';
-                        document.getElementById('album-artist').value = album.artist || '';
-                    });
+                document.getElementById('album-title').value = album.title || '';
+                document.getElementById('album-artist').value = album.artist || '';
+                document.getElementById('downloads-enabled-toggle').checked = !!album.downloads_enabled;
+                saveBtn.disabled = false;
+                loadReconcilePreview(albumId, seq);
             })
-            .then(function () {
-                return loadReconcilePreview(albumId);
+            .catch(function (err) {
+                if (seq !== loadSeq) return;
+                document.getElementById('track-list').innerHTML = '<div class="empty-state">Unable to load tracks.</div>';
+                setStatus(status, err.message, 'error');
             });
     }
 
-    function hideReconcileBar() {
-        var bar = document.getElementById('reconcile-bar');
-        if (bar) bar.classList.add('hidden');
+    function setTrackMeta(tracks) {
+        trackMetaByStem = {};
+        tracks.forEach(function (track) {
+            trackMetaByStem[track.stem] = { title: track.title || '' };
+        });
     }
 
-    function loadReconcilePreview(albumId) {
-        return fetch('/admin/api/albums/' + encodeURIComponent(String(albumId)) + '/reconcile', { credentials: 'same-origin' })
-            .then(function (r) { return r.ok ? r.json() : null; })
+    function trackTitle(stem) {
+        var meta = trackMetaByStem[stem];
+        return meta && meta.title ? meta.title : stem;
+    }
+
+    function hideReconcileBar() {
+        document.getElementById('reconcile-bar').classList.add('hidden');
+    }
+
+    function plural(n, word) {
+        return n + ' ' + word + (n === 1 ? '' : 's');
+    }
+
+    function loadReconcilePreview(albumId, seq) {
+        return api('GET', albumUrl(albumId) + '/reconcile')
             .then(function (report) {
-                if (!report) return;
+                if (seq !== loadSeq || !report) return;
                 var newCount = report.album_only ? report.album_only.length : 0;
                 var missingCount = report.config_only ? report.config_only.length : 0;
                 var mismatchCount = report.title_mismatches ? report.title_mismatches.length : 0;
 
-                if (newCount === 0 && missingCount === 0 && mismatchCount === 0) {
+                // Titles are never adopted from metadata, so mismatches alone need no action.
+                if (newCount === 0 && missingCount === 0) {
                     hideReconcileBar();
                     return;
                 }
+                reconcileReport = report;
 
                 var parts = [];
-                if (newCount > 0) parts.push(newCount + ' new track' + (newCount > 1 ? 's' : '') + ' found on disk');
-                if (missingCount > 0) parts.push(missingCount + ' track' + (missingCount > 1 ? 's' : '') + ' missing from disk');
-                if (mismatchCount > 0) parts.push(mismatchCount + ' title mismatch' + (mismatchCount > 1 ? 'es' : ''));
+                if (newCount > 0) parts.push(plural(newCount, 'new track') + ' found on disk');
+                if (missingCount > 0) parts.push(plural(missingCount, 'track') + ' missing from disk');
+                if (mismatchCount > 0) parts.push(mismatchCount + ' title' + (mismatchCount === 1 ? ' differs' : 's differ') + ' from file metadata');
 
-                var bar = document.getElementById('reconcile-bar');
                 document.getElementById('reconcile-summary').textContent = parts.join(', ');
-                bar.classList.remove('hidden');
+                document.getElementById('reconcile-bar').classList.remove('hidden');
             })
-            .catch(function () {});
+            .catch(function (err) {
+                if (seq !== loadSeq) return;
+                setStatus(document.getElementById('tracks-status'), 'Unable to check the album folder: ' + err.message, 'error');
+            });
     }
 
     function handleReconcileApply() {
-        if (!selectedAlbumId) return;
+        var albumId = selectedAlbumId;
+        var report = reconcileReport;
+        if (!albumId || !report) return;
         var status = document.getElementById('tracks-status');
         var btn = document.getElementById('btn-reconcile-apply');
+
+        var added = report.album_only ? report.album_only.length : 0;
+        var missing = (report.config_only || []).map(function (t) { return t.stem; });
+        var message = 'Import tracks from disk?\n\n' +
+            plural(added, 'new track') + ' will be added.\n' +
+            plural(missing.length, 'track') + ' missing from disk will be removed' + (missing.length ? ': ' + missing.join(', ') : '') + '.\n\n' +
+            'Existing track titles are kept. Unsaved edits in the track list will be lost.';
+        if (!confirm(message)) return;
+
         btn.disabled = true;
 
-        fetch('/admin/api/albums/' + encodeURIComponent(String(selectedAlbumId)) + '/reconcile', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            credentials: 'same-origin',
-            body: JSON.stringify({ adopt_metadata_titles: true, keep_missing: false })
-        })
-            .then(function (r) {
-                if (!r.ok) {
-                    return parseErrorResponse(r).then(function (msg) {
-                        throw new Error(msg || 'Reconcile failed');
-                    });
-                }
-                return r.json();
-            })
+        api('POST', albumUrl(albumId) + '/reconcile', { adopt_metadata_titles: false, keep_missing: false })
             .then(function (data) {
-                var applied = data.applied || {};
+                loadAlbums();
+                if (albumId !== selectedAlbumId) return;
+                var applied = (data && data.applied) || {};
                 var parts = [];
                 if (applied.added > 0) parts.push(applied.added + ' added');
                 if (applied.removed > 0) parts.push(applied.removed + ' removed');
-                if (applied.titles_updated > 0) parts.push(applied.titles_updated + ' titles updated');
+                reloadSelected();
                 setStatus(status, 'Tracks synced' + (parts.length ? ': ' + parts.join(', ') : ''), 'success');
-                loadTracks(selectedAlbumId);
-                loadAlbums();
             })
             .catch(function (err) {
-                setStatus(status, err.message || 'Reconcile failed', 'error');
+                setStatus(status, err.message, 'error');
             })
             .finally(function () {
                 btn.disabled = false;
@@ -1225,17 +1145,25 @@
         var container = document.getElementById('track-list');
         container.innerHTML = '';
 
-        tracks.forEach(function (track, index) {
+        if (!tracks.length) {
+            container.innerHTML = '<div class="empty-state">No tracks in this album.</div>';
+            return;
+        }
+
+        tracks.forEach(function (track) {
             var item = document.createElement('div');
+            var name = track.title || track.stem;
             item.className = 'track-item';
             item.draggable = true;
-            item.dataset.index = index;
+            item.setAttribute('data-stem', track.stem);
 
             item.innerHTML =
-                '<span class="drag-handle">&#x2261;</span>' +
+                '<span class="drag-handle" aria-hidden="true">&#x2261;</span>' +
                 '<span class="track-stem">' + escapeHtml(track.stem) + '</span>' +
-                '<input type="text" class="track-title-input" value="' + escapeAttr(track.title) + '" placeholder="Title">' +
-                '<input type="text" class="track-display-idx" value="' + escapeAttr(track.display_index || '') + '" placeholder="#">';
+                '<input type="text" class="track-title-input" value="' + escapeAttr(track.title) + '" placeholder="Title" aria-label="' + escapeAttr('Title for ' + track.stem) + '">' +
+                '<input type="text" class="track-display-idx" value="' + escapeAttr(track.display_index || '') + '" placeholder="#" aria-label="' + escapeAttr('Display number for ' + track.stem) + '">' +
+                '<button type="button" class="btn-small track-move" data-dir="up" aria-label="' + escapeAttr('Move ' + name + ' up') + '">&#x2191;</button>' +
+                '<button type="button" class="btn-small track-move" data-dir="down" aria-label="' + escapeAttr('Move ' + name + ' down') + '">&#x2193;</button>';
 
             // Drag events
             item.addEventListener('dragstart', onDragStart);
@@ -1245,6 +1173,19 @@
 
             container.appendChild(item);
         });
+    }
+
+    function handleTrackMove(e) {
+        var btn = e.target.closest('.track-move');
+        if (!btn) return;
+        var item = btn.closest('.track-item');
+        var list = item.parentNode;
+        if (btn.getAttribute('data-dir') === 'up') {
+            if (item.previousElementSibling) list.insertBefore(item, item.previousElementSibling);
+        } else if (item.nextElementSibling) {
+            list.insertBefore(item.nextElementSibling, item);
+        }
+        btn.focus();
     }
 
     var draggedItem = null;
@@ -1262,22 +1203,14 @@
 
     function onDrop(e) {
         e.preventDefault();
-        if (draggedItem === this) return;
+        if (!draggedItem || draggedItem === this || draggedItem.parentNode !== this.parentNode) return;
 
-        var container = document.getElementById('track-list');
-        var items = Array.from(container.children);
-        var fromIdx = items.indexOf(draggedItem);
-        var toIdx = items.indexOf(this);
-
-        if (fromIdx < toIdx) {
+        var items = Array.from(this.parentNode.children);
+        if (items.indexOf(draggedItem) < items.indexOf(this)) {
             this.parentNode.insertBefore(draggedItem, this.nextSibling);
         } else {
             this.parentNode.insertBefore(draggedItem, this);
         }
-
-        // Reorder currentTracks array
-        var moved = currentTracks.splice(fromIdx, 1)[0];
-        currentTracks.splice(toIdx, 0, moved);
     }
 
     function onDragEnd() {
@@ -1286,77 +1219,66 @@
     }
 
     function handleSaveTracks() {
+        var albumId = selectedAlbumId;
         var status = document.getElementById('tracks-status');
+        var btn = document.getElementById('btn-save-tracks');
 
-        if (!selectedAlbumId) {
+        if (!albumId) {
             setStatus(status, 'No album selected', 'error');
             return;
         }
 
-        var items = document.getElementById('track-list').querySelectorAll('.track-item');
-
-        var tracks = [];
-        items.forEach(function (item, i) {
-            var titleInput = item.querySelector('.track-title-input');
-            var idxInput = item.querySelector('.track-display-idx');
-            tracks.push({
-                stem: currentTracks[i].stem,
-                title: titleInput.value,
-                display_index: idxInput.value || undefined
-            });
+        var body = {
+            title: document.getElementById('album-title').value,
+            artist: document.getElementById('album-artist').value
+        };
+        var tracks = Array.prototype.map.call(document.querySelectorAll('#track-list .track-item'), function (item) {
+            return {
+                stem: item.getAttribute('data-stem'),
+                title: item.querySelector('.track-title-input').value,
+                display_index: item.querySelector('.track-display-idx').value || undefined
+            };
         });
+        if (tracks.length) {
+            body.tracks = tracks;
+        }
 
-        fetch('/admin/api/albums/' + encodeURIComponent(String(selectedAlbumId)) + '/tracks', {
-            method: 'PUT',
-            headers: { 'Content-Type': 'application/json' },
-            credentials: 'same-origin',
-            body: JSON.stringify({
-                title: document.getElementById('album-title').value,
-                artist: document.getElementById('album-artist').value,
-                tracks: tracks
+        btn.disabled = true;
+
+        api('PUT', albumUrl(albumId) + '/tracks', body)
+            .then(function () {
+                loadAlbums();
+                refreshConfig();
+                if (albumId !== selectedAlbumId) return;
+                // Save stays disabled until the reload refills the form; a blank artist field would clear the artist.
+                reloadSelected();
+                setStatus(status, 'Saved', 'success');
             })
-        })
-            .then(function (r) {
-                if (r.ok) {
-                    setStatus(status, 'Saved', 'success');
-                    loadAlbums();
-                    loadConfig();
-                    return;
-                }
-                return parseErrorResponse(r).then(function (msg) {
-                    setStatus(status, msg || 'Save failed', 'error');
-                });
-            })
-            .catch(function () {
-                setStatus(status, 'Save failed', 'error');
+            .catch(function (err) {
+                if (albumId !== selectedAlbumId) return;
+                btn.disabled = false;
+                setStatus(status, err.message, 'error');
             });
     }
 
     // --- Analytics ---
-    function loadAnalytics(albumId) {
+    function loadAnalytics(albumId, seq) {
         // Always clear stale data first
         document.getElementById('analytics-overview').innerHTML = '';
         document.getElementById('track-stats-body').innerHTML = '<tr><td colspan="6">Loading...</td></tr>';
         document.getElementById('sessions-body').innerHTML = '<tr><td colspan="4">Loading...</td></tr>';
 
-        if (!albumId) return;
-
-        fetch('/admin/api/albums/' + encodeURIComponent(String(albumId)) + '/analytics', { credentials: 'same-origin' })
-            .then(function (r) {
-                if (!r.ok) {
-                    throw new Error('analytics');
-                }
-                return r.json();
-            })
+        return api('GET', albumUrl(albumId) + '/analytics')
             .then(function (data) {
+                if (seq !== loadSeq) return;
                 renderOverview(data.overall);
                 renderTrackStats(data.tracks, data.heatmaps);
                 renderSessions(data.sessions);
             })
-            .catch(function () {
-                document.getElementById('analytics-overview').innerHTML = '';
-                document.getElementById('track-stats-body').innerHTML = '<tr><td colspan="6">No data yet</td></tr>';
-                document.getElementById('sessions-body').innerHTML = '<tr><td colspan="4">No sessions yet</td></tr>';
+            .catch(function (err) {
+                if (seq !== loadSeq) return;
+                document.getElementById('track-stats-body').innerHTML = '<tr><td colspan="6">' + escapeHtml('Unable to load analytics: ' + err.message) + '</td></tr>';
+                document.getElementById('sessions-body').innerHTML = '<tr><td colspan="4">-</td></tr>';
             });
     }
 
@@ -1369,8 +1291,8 @@
         container.innerHTML =
             '<div class="stat-card"><div class="stat-value">' + (overall.total_sessions || 0) + '</div><div class="stat-label">Sessions</div></div>' +
             '<div class="stat-card"><div class="stat-value">' + (overall.avg_tracks_per_session || 0).toFixed(1) + '</div><div class="stat-label">Avg Tracks/Session</div></div>' +
-            '<div class="stat-card"><div class="stat-value">' + escapeHtml(overall.most_completed || '-') + '</div><div class="stat-label">Most Completed</div></div>' +
-            '<div class="stat-card"><div class="stat-value">' + escapeHtml(overall.least_completed || '-') + '</div><div class="stat-label">Least Completed</div></div>';
+            '<div class="stat-card"><div class="stat-value">' + escapeHtml(overall.most_completed ? trackTitle(overall.most_completed) : '-') + '</div><div class="stat-label">Most Completed</div></div>' +
+            '<div class="stat-card"><div class="stat-value">' + escapeHtml(overall.least_completed ? trackTitle(overall.least_completed) : '-') + '</div><div class="stat-label">Least Completed</div></div>';
     }
 
     function renderTrackStats(tracks, heatmaps) {
@@ -1383,9 +1305,8 @@
         }
 
         tracks.forEach(function (t) {
-            var meta = trackMetaByStem[t.stem] || {};
-            var displayTitle = meta.title || t.stem;
-            var subline = (meta.title && meta.title !== t.stem)
+            var displayTitle = trackTitle(t.stem);
+            var subline = displayTitle !== t.stem
                 ? '<div class="stem-subline">' + escapeHtml(t.stem) + '</div>'
                 : '';
 
@@ -1412,9 +1333,6 @@
             if (c > maxCount) maxCount = c;
         });
 
-        var meta = trackMetaByStem[stem] || {};
-        var duration = Number(meta.duration || 0);
-
         if (maxCount === 0) {
             return '<span class="heatmap heatmap-empty" title="No dropout events for this track">' + bins.map(function () {
                 return '<span class="heatmap-bin heatmap-level-0"></span>';
@@ -1425,30 +1343,20 @@
             var count = Number(b.count || 0);
             var intensity = count / maxCount;
             var level = Math.max(1, Math.min(5, Math.ceil(intensity * 5)));
-            var tooltip = buildHeatmapTooltip(stem, b, count, totalCount, duration);
+            var tooltip = buildHeatmapTooltip(stem, b, count, totalCount);
             return '<span class="heatmap-bin heatmap-level-' + level + '" data-tooltip="' + escapeAttr(tooltip) + '" aria-label="' + escapeAttr(tooltip) + '"></span>';
         }).join('') + '</span>';
     }
 
-    function buildHeatmapTooltip(stem, bin, count, totalCount, durationSeconds) {
-        var meta = trackMetaByStem[stem] || {};
-        var title = meta.title || stem;
+    function buildHeatmapTooltip(stem, bin, count, totalCount) {
         var startPct = Math.round(Number(bin.bin_start || 0) * 100);
         var endPct = Math.round(Number(bin.bin_end || 0) * 100);
-
-        var rangeLabel;
-        if (durationSeconds > 0) {
-            var startSec = Number(bin.bin_start || 0) * durationSeconds;
-            var endSec = Number(bin.bin_end || 0) * durationSeconds;
-            rangeLabel = 'Range: ' + formatDuration(startSec) + ' - ' + formatDuration(endSec) + ' (' + startPct + '%-' + endPct + '%)';
-        } else {
-            rangeLabel = 'Range: ' + startPct + '%-' + endPct + '% of track';
-        }
+        var rangeLabel = 'Range: ' + startPct + '%-' + endPct + '% of track';
 
         var share = totalCount > 0 ? Math.round((count / totalCount) * 100) : 0;
         var countLabel = 'Dropouts: ' + count + (totalCount > 0 ? ' (' + share + '% of track dropouts)' : '');
 
-        return title + '\n' + rangeLabel + '\n' + countLabel;
+        return trackTitle(stem) + '\n' + rangeLabel + '\n' + countLabel;
     }
 
     function renderSessions(sessions) {
@@ -1463,29 +1371,12 @@
         sessions.forEach(function (s) {
             var tr = document.createElement('tr');
             tr.innerHTML =
-                '<td>' + escapeHtml(s.started_at) + '</td>' +
-                '<td>' + escapeHtml(s.last_seen_at) + '</td>' +
+                '<td>' + escapeHtml(formatDateTime(s.started_at)) + '</td>' +
+                '<td>' + escapeHtml(formatDateTime(s.last_seen_at)) + '</td>' +
                 '<td>' + Number(s.tracks_heard || 0) + '</td>' +
                 '<td><code>' + escapeHtml(s.ip_hash || '') + '</code></td>';
             tbody.appendChild(tr);
         });
-    }
-
-    function formatDuration(secondsRaw) {
-        var total = Math.max(0, Math.round(Number(secondsRaw) || 0));
-        var hours = Math.floor(total / 3600);
-        var minutes = Math.floor((total % 3600) / 60);
-        var seconds = total % 60;
-
-        if (hours > 0) {
-            return hours + ':' + pad2(minutes) + ':' + pad2(seconds);
-        }
-        return minutes + ':' + pad2(seconds);
-    }
-
-    function pad2(n) {
-        n = Number(n) || 0;
-        return n < 10 ? '0' + n : String(n);
     }
 
     function formatDateTime(value) {

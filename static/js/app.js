@@ -6,8 +6,7 @@
         currentAlbum: null, // {slug, title, artist}
         albumData: null,
         currentTrackIndex: -1,
-        offlineMode: false,
-        playbackStateKey: "acetate-playback-v1",
+        albumLoadSeq: 0,
         pendingDeepLinkSearch: "",
 
         init: function () {
@@ -15,11 +14,21 @@
                 window.location.search,
             );
 
-            // Always clear any existing listener session so visitors must re-enter the passphrase
+            // Always clear any existing listener session so visitors must re-enter the passphrase.
+            // The input stays disabled until then so the logout cannot clear a fresh login cookie.
+            var input = document.getElementById("passphrase");
+            var logout = new AbortController();
+            setTimeout(() => logout.abort(), 5000);
             fetch("/api/auth", {
                 method: "DELETE",
                 credentials: "same-origin",
-            }).catch(() => {});
+                signal: logout.signal,
+            })
+                .catch(() => {})
+                .then(() => {
+                    input.disabled = false;
+                    input.focus();
+                });
             this.showGate();
 
             // Register service worker
@@ -52,25 +61,23 @@
             );
         },
 
-        offlineAlbumKey: function () {
-            var slug = this.currentAlbum ? this.currentAlbum.slug : "default";
-            return "acetate-offline-album-" + slug;
+        currentTrack: function () {
+            var tracks = this.albumData && this.albumData.tracks;
+            return (tracks && tracks[this.currentTrackIndex]) || null;
         },
 
+        // Called with a non-empty album list (gate.js handles the empty case).
         onAuthenticated: function (authData) {
             this.notifyServiceWorker("AUTHENTICATED");
+            this.albums = authData.albums;
 
-            if (authData && authData.albums) {
-                this.albums = authData.albums;
-            }
-
-            if (!this.albums || this.albums.length === 0) {
-                // No albums accessible — shouldn't happen but handle gracefully
-                this.showGate();
-                return;
-            }
-
-            if (this.albums.length === 1) {
+            var linkedSlug = new URLSearchParams(this.pendingDeepLinkSearch).get(
+                "album",
+            );
+            var linked = this.albums.find((a) => a.slug === linkedSlug);
+            if (linked) {
+                this.selectAlbum(linked);
+            } else if (this.albums.length === 1) {
                 this.selectAlbum(this.albums[0]);
             } else {
                 this.showAlbumSelector();
@@ -79,8 +86,6 @@
 
         selectAlbum: function (album) {
             this.currentAlbum = album;
-            this.offlineMode = false;
-            document.body.classList.remove("offline-mode");
 
             var nextSearch = window.location.search;
             if (
@@ -99,15 +104,8 @@
         },
 
         showAlbumSelector: function () {
+            this.stopPlayback();
             this.state = "selector";
-            this.currentAlbum = null;
-            if (
-                typeof AcetatePlayer !== "undefined" &&
-                AcetatePlayer.isPlaying &&
-                AcetatePlayer.isPlaying()
-            ) {
-                AcetatePlayer.pause();
-            }
             history.pushState(
                 { screen: "selector" },
                 "",
@@ -120,48 +118,43 @@
             if (typeof AcetateSelector !== "undefined") {
                 AcetateSelector.render(this.albums);
             }
+            this.focusSoon(document.querySelector("#album-grid .album-card"));
+        },
+
+        // Stops audio (even mid-buffer) and invalidates any in-flight album load.
+        stopPlayback: function () {
+            if (typeof AcetatePlayer !== "undefined") {
+                AcetatePlayer.pause();
+            }
+            this.albumLoadSeq++;
+            this.currentAlbum = null;
+            this.albumData = null;
         },
 
         loadAlbumData: function () {
-            var base = this.albumApiBase();
-            fetch(base + "/tracks", { credentials: "same-origin" })
+            var token = ++this.albumLoadSeq;
+            fetch(this.albumApiBase() + "/tracks", { credentials: "same-origin" })
                 .then((r) => {
-                    if (!r.ok) {
-                        if (r.status === 401 || r.status === 403) {
-                            throw new Error("unauthorized");
+                    if (token !== Acetate.albumLoadSeq) return;
+                    if (r.status === 401) {
+                        Acetate.handleUnauthorized();
+                        return;
+                    }
+                    if (!r.ok) throw new Error("tracks_unavailable");
+                    return r.json().then((data) => {
+                        if (token === Acetate.albumLoadSeq) {
+                            Acetate.onAlbumDataLoaded(data);
                         }
-                        throw new Error("tracks_unavailable");
-                    }
-                    return r.json();
+                    });
                 })
-                .then((data) => {
-                    Acetate.offlineMode = false;
-                    document.body.classList.remove("offline-mode");
-                    Acetate.storeOfflineAlbumSnapshot(data);
-                    Acetate.onAlbumDataLoaded(data, false);
-                })
-                .catch((err) => {
-                    if (err && err.message === "unauthorized") {
-                        Acetate.notifyServiceWorker("UNAUTHENTICATED");
-                        Acetate.showGate();
-                        return;
-                    }
-
-                    var offlineData = Acetate.readOfflineAlbumSnapshot();
-                    if (offlineData) {
-                        Acetate.offlineMode = true;
-                        document.body.classList.add("offline-mode");
-                        Acetate.notifyServiceWorker("AUTHENTICATED");
-                        Acetate.onAlbumDataLoaded(offlineData, true);
-                        return;
-                    }
-
-                    Acetate.notifyServiceWorker("UNAUTHENTICATED");
+                .catch(() => {
+                    if (token !== Acetate.albumLoadSeq) return;
                     Acetate.showGate();
+                    AcetateGate.showStatus("Couldn't load the album, try again");
                 });
         },
 
-        onAlbumDataLoaded: function (data, isOffline) {
+        onAlbumDataLoaded: function (data) {
             Acetate.albumData = data;
             document.title = data.title + " — Acetate";
             Acetate.showPlayer();
@@ -177,34 +170,57 @@
 
             var target = Acetate.resolveInitialPlaybackTarget(data);
             AcetatePlayer.loadTrack(target.index, { startTime: target.time });
+            Acetate.warmOfflineCaches(data);
+        },
 
-            if (!isOffline) {
-                Acetate.warmOfflineCaches(data);
-            }
+        // A mid-album failure may be an expired session; only a 401 sends the listener back.
+        checkSession: function () {
+            if (!this.currentAlbum) return;
+            var slug = this.currentAlbum.slug;
+            fetch(this.albumApiBase() + "/tracks", {
+                credentials: "same-origin",
+                cache: "no-store",
+            })
+                .then((r) => {
+                    if (
+                        r.status === 401 &&
+                        Acetate.currentAlbum &&
+                        Acetate.currentAlbum.slug === slug
+                    ) {
+                        Acetate.handleUnauthorized();
+                    }
+                })
+                .catch(() => {});
+        },
+
+        handleUnauthorized: function () {
+            this.notifyServiceWorker("UNAUTHENTICATED");
+            this.showGate();
+            AcetateGate.showStatus("Session expired, enter the passphrase again");
         },
 
         showGate: function () {
+            this.stopPlayback();
             this.state = "gate";
-            this.offlineMode = false;
-            this.currentAlbum = null;
             this.albums = null;
-            document.body.classList.remove("offline-mode");
-            if (
-                typeof AcetatePlayer !== "undefined" &&
-                AcetatePlayer.isPlaying &&
-                AcetatePlayer.isPlaying()
-            ) {
-                AcetatePlayer.pause();
-            }
             document.getElementById("gate").classList.add("active");
             document.getElementById("player").classList.remove("active");
             document.getElementById("selector").classList.remove("active");
+            AcetateGate.showStatus("");
             var input = document.getElementById("passphrase");
             input.value = "";
-            setTimeout(() => {
-                input.focus();
-            }, 100);
+            this.focusSoon(input);
         },
+
+        // Focus after the screen's visibility transition has started.
+        focusSoon: function (el) {
+            if (el) setTimeout(() => el.focus(), 100);
+        },
+
+        scrollBehavior: () =>
+            window.matchMedia("(prefers-reduced-motion: reduce)").matches
+                ? "auto"
+                : "smooth",
 
         showPlayer: function () {
             this.state = "player";
@@ -214,31 +230,37 @@
 
             // Load cover
             var cover = document.getElementById("cover");
-            cover.classList.remove("hidden", "fallback");
+            cover.classList.remove("fallback");
             cover.src = this.albumApiBase() + "/cover";
             cover.onerror = function () {
                 this.onerror = null;
                 this.classList.add("fallback");
                 this.src = Acetate.makeCoverFallback();
             };
+            this.focusSoon(document.getElementById("btn-play"));
         },
 
         resolveInitialPlaybackTarget: function (albumData) {
             var tracks = albumData && albumData.tracks ? albumData.tracks : [];
             if (!tracks.length) return { index: 0, time: 0 };
 
-            if (this.pendingDeepLinkSearch) {
+            // A link naming another album stays pending in case that album is picked later.
+            var linkedSlug = new URLSearchParams(this.pendingDeepLinkSearch).get(
+                "album",
+            );
+            if (
+                this.pendingDeepLinkSearch &&
+                (!linkedSlug || linkedSlug === this.currentAlbum.slug)
+            ) {
                 var deepLink = this.parseDeepLinkTarget(
                     tracks,
                     this.pendingDeepLinkSearch,
                 );
-                if (deepLink) {
-                    this.pendingDeepLinkSearch = "";
-                    return deepLink;
-                }
+                this.pendingDeepLinkSearch = "";
+                if (deepLink) return deepLink;
             }
 
-            var playbackState = this.readPlaybackState();
+            var playbackState = AcetatePlayer.getStoredPlaybackState();
             if (playbackState) {
                 if (
                     playbackState.album_fingerprint &&
@@ -274,7 +296,7 @@
             var idx = 0;
             if (hasTrack) {
                 idx = this.parseTrackIndexParam(params.get("track"), tracks);
-                if (idx < 0) idx = 0;
+                if (idx < 0) return null;
             }
 
             return {
@@ -355,54 +377,6 @@
             return stems;
         },
 
-        readPlaybackState: function () {
-            if (
-                typeof AcetatePlayer !== "undefined" &&
-                typeof AcetatePlayer.getStoredPlaybackState === "function"
-            ) {
-                return AcetatePlayer.getStoredPlaybackState();
-            }
-            try {
-                var raw = localStorage.getItem(this.playbackStateKey);
-                return raw ? JSON.parse(raw) : null;
-            } catch (err) {
-                return null;
-            }
-        },
-
-        storeOfflineAlbumSnapshot: function (data) {
-            try {
-                localStorage.setItem(
-                    this.offlineAlbumKey(),
-                    JSON.stringify({
-                        saved_at: Date.now(),
-                        album: data,
-                    }),
-                );
-            } catch (err) {
-                // Ignore storage quota errors.
-            }
-        },
-
-        readOfflineAlbumSnapshot: function () {
-            try {
-                var raw = localStorage.getItem(this.offlineAlbumKey());
-                if (!raw) return null;
-                var parsed = JSON.parse(raw);
-                if (
-                    !parsed ||
-                    !parsed.album ||
-                    !parsed.album.tracks ||
-                    !parsed.album.tracks.length
-                ) {
-                    return null;
-                }
-                return parsed.album;
-            } catch (err) {
-                return null;
-            }
-        },
-
         warmOfflineCaches: function (albumData) {
             if (!albumData || !albumData.tracks) return;
             var base = this.albumApiBase();
@@ -427,7 +401,7 @@
 
         extractDeepLinkSearch: function (search) {
             var params = new URLSearchParams(search || "");
-            if (!params.has("track") && !params.has("t")) {
+            if (!params.has("album") && !params.has("track") && !params.has("t")) {
                 return "";
             }
             return search || "";
@@ -442,9 +416,9 @@
             title = String(title).replace(/[<>&]/g, "").slice(0, 28);
             var svg =
                 "<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 300 300'>" +
-                "<rect width='300' height='300' fill='%23110f0d'/>" +
-                "<rect x='12' y='12' width='276' height='276' fill='none' stroke='%23292620' stroke-width='2'/>" +
-                "<text x='150' y='155' text-anchor='middle' fill='%23d4cfc4' font-size='26' font-family='serif'>" +
+                "<rect width='300' height='300' fill='#110f0d'/>" +
+                "<rect x='12' y='12' width='276' height='276' fill='none' stroke='#292620' stroke-width='2'/>" +
+                "<text x='150' y='155' text-anchor='middle' fill='#d4cfc4' font-size='26' font-family='serif'>" +
                 title +
                 "</text>" +
                 "</svg>";

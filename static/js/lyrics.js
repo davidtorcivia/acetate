@@ -8,14 +8,13 @@
     var activeIndex = -1;
     var lrcGroups = [];
     var lyricsVisible = true;
+    var loadSeq = 0;
     var HIGHLIGHT_LEAD_SECONDS = 0.17;
 
     window.AcetateLyrics = {
         load: load,
         update: update,
-        toggleVisibility: toggleVisibility,
-        setVisible: setVisible,
-        isVisible: function () { return lyricsVisible; }
+        toggleVisibility: toggleVisibility
     };
 
     function init() {
@@ -27,6 +26,7 @@
     function load(stem, format) {
         if (!lyricsEl) return;
 
+        var seq = ++loadSeq;
         currentFormat = null;
         lrcData = null;
         activeIndex = -1;
@@ -34,16 +34,17 @@
         lyricsEl.innerHTML = '';
 
         if (!format) {
-            lyricsEl.innerHTML = '<div class="no-lyrics"></div>';
+            renderEmpty();
             return;
         }
 
-        fetch(Acetate.albumApiBase() + '/lyrics/' + encodePathSegment(stem), { credentials: 'same-origin' })
+        fetch(Acetate.albumApiBase() + '/lyrics/' + Acetate.encodePathSegment(stem), { credentials: 'same-origin' })
             .then(function (r) {
                 if (!r.ok) throw new Error('not found');
                 return r.json();
             })
             .then(function (data) {
+                if (seq !== loadSeq) return;
                 currentFormat = data.format;
                 if (data.format === 'lrc') {
                     renderLRC(data.content, data.structure_content || '');
@@ -54,15 +55,24 @@
                 }
             })
             .catch(function () {
-                lyricsEl.innerHTML = '<div class="no-lyrics"></div>';
+                if (seq === loadSeq) renderEmpty();
             });
+    }
+
+    function renderEmpty() {
+        lyricsEl.innerHTML = '';
+        var empty = document.createElement('div');
+        empty.className = 'no-lyrics';
+        empty.textContent = 'No lyrics';
+        lyricsEl.appendChild(empty);
     }
 
     function parseLRC(content) {
         var lines = normalizeNewlines(content).split('\n');
         var grouped = Object.create(null);
-        var timeRegex = /\[(\d{1,2}):(\d{2})(?:\.(\d{1,3}))?\]/g;
+        var timeRegex = /\[(\d{1,3}):(\d{2})(?:[.:](\d{1,3}))?\]/g;
         var pendingBreak = false;
+        var offsetMs = 0;
 
         for (var i = 0; i < lines.length; i++) {
             var line = lines[i];
@@ -72,8 +82,15 @@
                 continue;
             }
 
+            // [offset:+/-ms]: positive values make lyrics appear earlier.
+            var offsetMatch = trimmed.match(/^\[offset:\s*([+-]?\d+)\s*\]$/i);
+            if (offsetMatch) {
+                offsetMs = parseInt(offsetMatch[1], 10);
+                continue;
+            }
+
+            // Timed lines with no text are end markers: they clear the highlight.
             var text = cleanDisplayLine(trimmed);
-            if (!text) continue;
 
             var match = null;
             var hasTimestamp = false;
@@ -90,21 +107,30 @@
                 var key = String(timeMs);
 
                 if (!grouped[key]) {
-                    grouped[key] = { time: timeMs / 1000, lines: [], breakBefore: pendingBreak };
-                } else if (pendingBreak) {
-                    grouped[key].breakBefore = true;
+                    grouped[key] = { time: timeMs / 1000, lines: [], breakBefore: false };
                 }
-                grouped[key].lines.push(text);
+                if (text) {
+                    if (pendingBreak) grouped[key].breakBefore = true;
+                    grouped[key].lines.push(text);
+                }
             }
 
-            if (hasTimestamp) {
+            if (hasTimestamp && text) {
                 pendingBreak = false;
             }
         }
 
-        var entries = Object.keys(grouped).map(function (k) { return grouped[k]; });
+        var entries = Object.keys(grouped).map(function (k) {
+            var entry = grouped[k];
+            entry.time = Math.max(0, entry.time - offsetMs / 1000);
+            return entry;
+        });
         entries.sort(function (a, b) { return a.time - b.time; });
-        return entries;
+        // A file of only end markers has no lyrics; let the caller fall back.
+        for (var e = 0; e < entries.length; e++) {
+            if (entries[e].lines.length) return entries;
+        }
+        return [];
     }
 
     function parseSRT(content) {
@@ -310,6 +336,7 @@
         lyricsEl.innerHTML = '';
 
         lrcGroups = [];
+        var hasTabStop = false;
         for (var i = 0; i < lrcData.length; i++) {
             var entry = lrcData[i];
             var group = document.createElement('div');
@@ -319,12 +346,16 @@
             }
             group.dataset.index = i;
             group.dataset.time = String(entry.time || 0);
-            group.classList.add('timed');
-            group.tabIndex = 0;
-            group.setAttribute('role', 'button');
-            group.setAttribute('aria-label', 'Seek lyrics to ' + formatTimeLabel(entry.time));
-            group.addEventListener('click', onLineGroupActivate);
-            group.addEventListener('keydown', onLineGroupKeydown);
+            if (entry.lines.length) {
+                // Roving tabindex: one line is the tab stop, arrow keys move it.
+                group.classList.add('timed');
+                group.tabIndex = hasTabStop ? -1 : 0;
+                hasTabStop = true;
+                group.setAttribute('role', 'button');
+                group.setAttribute('aria-label', 'Seek lyrics to ' + formatTimeLabel(entry.time));
+                group.addEventListener('click', onLineGroupActivate);
+                group.addEventListener('keydown', onLineGroupKeydown);
+            }
 
             if (entry.sectionLabel) {
                 var label = document.createElement('div');
@@ -388,7 +419,7 @@
         }
 
         if (!hasAny) {
-            lyricsEl.innerHTML = '<div class="no-lyrics"></div>';
+            renderEmpty();
         }
     }
 
@@ -416,7 +447,7 @@
             var activeGroup = lrcGroups[activeIndex];
             if (activeGroup) {
                 var target = activeGroup.offsetTop - (container.clientHeight / 2) + (activeGroup.offsetHeight / 2);
-                container.scrollTo({ top: Math.max(0, target), behavior: 'smooth' });
+                container.scrollTo({ top: Math.max(0, target), behavior: Acetate.scrollBehavior() });
             }
         }
     }
@@ -465,7 +496,16 @@
         if (e.key === 'Enter' || e.key === ' ') {
             e.preventDefault();
             onLineGroupActivate(e);
+            return;
         }
+        var timed = Array.prototype.slice.call(container.querySelectorAll('.line-group.timed'));
+        var i = timed.indexOf(e.currentTarget);
+        var next = { ArrowDown: i + 1, ArrowUp: i - 1, Home: 0, End: timed.length - 1 }[e.key];
+        if (next === undefined || !timed[next]) return;
+        e.preventDefault();
+        e.currentTarget.tabIndex = -1;
+        timed[next].tabIndex = 0;
+        timed[next].focus();
     }
 
     function toggleVisibility() {
@@ -489,12 +529,6 @@
         var mins = Math.floor(total / 60);
         var secs = total % 60;
         return mins + ':' + (secs < 10 ? '0' : '') + secs;
-    }
-
-    function encodePathSegment(value) {
-        return encodeURIComponent(value).replace(/[!'()*]/g, function (ch) {
-            return '%' + ch.charCodeAt(0).toString(16).toUpperCase();
-        });
     }
 
     document.addEventListener('DOMContentLoaded', init);

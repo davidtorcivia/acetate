@@ -43,14 +43,6 @@ CREATE TABLE IF NOT EXISTS events (
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP
 );
 
-CREATE TABLE IF NOT EXISTS analytics_rollups_daily (
-    day TEXT NOT NULL,
-    track_stem TEXT NOT NULL,
-    event_type TEXT NOT NULL,
-    total_count INTEGER NOT NULL,
-    PRIMARY KEY (day, track_stem, event_type)
-);
-
 CREATE TABLE IF NOT EXISTS admin_auth_audit (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     occurred_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
@@ -133,9 +125,6 @@ func Migrate(db *sql.DB) error {
 	if err := ensureColumnExists(db, "events", "album_id", "INTEGER"); err != nil {
 		return err
 	}
-	if err := ensureColumnExists(db, "analytics_rollups_daily", "album_id", "INTEGER"); err != nil {
-		return err
-	}
 
 	if err := ensureIndexes(db); err != nil {
 		return err
@@ -147,24 +136,25 @@ func Migrate(db *sql.DB) error {
 func ensureIndexes(db *sql.DB) error {
 	stmts := []string{
 		"CREATE INDEX IF NOT EXISTS idx_events_track ON events(track_stem)",
-		"CREATE INDEX IF NOT EXISTS idx_events_type ON events(event_type)",
 		"CREATE INDEX IF NOT EXISTS idx_events_session ON events(session_id)",
 		"CREATE INDEX IF NOT EXISTS idx_events_created_at ON events(created_at)",
-		"CREATE INDEX IF NOT EXISTS idx_sessions_last_seen ON sessions(last_seen_at)",
-		"CREATE INDEX IF NOT EXISTS idx_admin_sessions_user ON admin_sessions(user_id)",
-		"CREATE INDEX IF NOT EXISTS idx_admin_users_username ON admin_users(username)",
-		"CREATE INDEX IF NOT EXISTS idx_admin_users_active ON admin_users(is_active)",
-		"CREATE INDEX IF NOT EXISTS idx_rollups_day ON analytics_rollups_daily(day)",
-		"CREATE INDEX IF NOT EXISTS idx_rollups_track ON analytics_rollups_daily(track_stem)",
-		"CREATE INDEX IF NOT EXISTS idx_admin_auth_audit_occurred ON admin_auth_audit(occurred_at)",
-		// Multi-album indexes
-		"CREATE INDEX IF NOT EXISTS idx_albums_slug ON albums(slug)",
-		"CREATE INDEX IF NOT EXISTS idx_album_tracks_album ON album_tracks(album_id)",
-		"CREATE INDEX IF NOT EXISTS idx_album_tracks_album_sort ON album_tracks(album_id, sort_order)",
-		"CREATE INDEX IF NOT EXISTS idx_password_album_access_password ON password_album_access(password_id)",
-		"CREATE INDEX IF NOT EXISTS idx_password_album_access_album ON password_album_access(album_id)",
-		"CREATE INDEX IF NOT EXISTS idx_sessions_password ON sessions(password_id)",
 		"CREATE INDEX IF NOT EXISTS idx_events_album ON events(album_id)",
+		"CREATE INDEX IF NOT EXISTS idx_sessions_last_seen ON sessions(last_seen_at)",
+		"CREATE INDEX IF NOT EXISTS idx_sessions_password ON sessions(password_id)",
+		"CREATE INDEX IF NOT EXISTS idx_admin_sessions_user ON admin_sessions(user_id)",
+		"CREATE INDEX IF NOT EXISTS idx_admin_auth_audit_occurred ON admin_auth_audit(occurred_at)",
+		"CREATE INDEX IF NOT EXISTS idx_album_tracks_album_sort ON album_tracks(album_id, sort_order)",
+		"CREATE INDEX IF NOT EXISTS idx_password_album_access_album ON password_album_access(album_id)",
+
+		// Removed: never-read daily rollups, and indexes duplicating a UNIQUE or
+		// primary key prefix (or too unselective to help).
+		"DROP TABLE IF EXISTS analytics_rollups_daily",
+		"DROP INDEX IF EXISTS idx_events_type",
+		"DROP INDEX IF EXISTS idx_admin_users_username",
+		"DROP INDEX IF EXISTS idx_admin_users_active",
+		"DROP INDEX IF EXISTS idx_albums_slug",
+		"DROP INDEX IF EXISTS idx_album_tracks_album",
+		"DROP INDEX IF EXISTS idx_password_album_access_password",
 	}
 
 	for _, stmt := range stmts {

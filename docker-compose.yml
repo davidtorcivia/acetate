@@ -2,7 +2,8 @@ services:
   acetate:
     build: .
     ports:
-      - "8087:8080"
+      # Loopback only: cloudflared on the host is the one client.
+      - "127.0.0.1:8087:8080"
     volumes:
       - ./album:/album:ro
       - ./data:/data
@@ -12,14 +13,7 @@ services:
       - DATA_PATH=/data
       - ADMIN_USERNAME=${ADMIN_USERNAME:-}
       - ADMIN_PASSWORD_HASH=${ADMIN_PASSWORD_HASH:-}
+      # Host processes (cloudflared) reach the container through the bridge gateway.
+      - TRUSTED_PROXIES=${TRUSTED_PROXIES:-172.16.0.0/12}
+      - ANALYTICS_RETENTION_DAYS=${ANALYTICS_RETENTION_DAYS:-0}
     restart: unless-stopped
-
-  wizard:
-    image: golang:1.24
-    working_dir: /src
-    command: ["go", "run", "./cmd/setupwizard"]
-    stdin_open: true
-    tty: true
-    profiles: ["tools"]
-    volumes:
-      - ./:/src

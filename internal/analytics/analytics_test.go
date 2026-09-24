@@ -10,6 +10,8 @@ import (
 
 const testSessionID = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
 
+var testStems = map[string]bool{"01-gathering": true, "01. Intro": true}
+
 func testCollector(t *testing.T) *Collector {
 	t.Helper()
 	dir := t.TempDir()
@@ -133,7 +135,7 @@ func TestRecordBatch(t *testing.T) {
 		{"event_type": "pause", "track_stem": "01-gathering", "position_seconds": 30.5}
 	]`)
 
-	if err := c.RecordBatch(testSessionID, data, 0); err != nil {
+	if err := c.RecordBatch(testSessionID, data, 0, testStems); err != nil {
 		t.Fatalf("RecordBatch: %v", err)
 	}
 
@@ -192,7 +194,7 @@ func TestRecordBatchRejectsOversizedBatch(t *testing.T) {
 	}
 	data, _ := json.Marshal(events)
 
-	if err := c.RecordBatch(testSessionID, data, 0); err == nil {
+	if err := c.RecordBatch(testSessionID, data, 0, testStems); err == nil {
 		t.Fatal("expected oversized batch error")
 	}
 }
@@ -212,7 +214,7 @@ func TestRecordBatchSkipsInvalidEvents(t *testing.T) {
 		{"event_type":"bogus","track_stem":"01-gathering"},
 		{"event_type":"pause","track_stem":"../../etc/passwd"}
 	]`)
-	if err := c.RecordBatch(testSessionID, data, 0); err != nil {
+	if err := c.RecordBatch(testSessionID, data, 0, testStems); err != nil {
 		t.Fatalf("RecordBatch: %v", err)
 	}
 	c.Close()
@@ -230,7 +232,93 @@ func TestRecordBatchRejectsInvalidSessionID(t *testing.T) {
 	c := testCollector(t)
 
 	data := []byte(`[{"event_type":"play","track_stem":"01-gathering"}]`)
-	if err := c.RecordBatch("invalid-session", data, 0); err == nil {
+	if err := c.RecordBatch("invalid-session", data, 0, testStems); err == nil {
 		t.Fatal("expected invalid session error")
+	}
+}
+
+func TestRecordBatchAcceptsSeekDottedStemsAndRejectsUnknownStems(t *testing.T) {
+	dir := t.TempDir()
+	db, err := database.Open(dir)
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	defer db.Close()
+	c := NewCollector(db)
+
+	data := []byte(`[
+		{"event_type":"seek","track_stem":"01. Intro","position_seconds":12,"metadata":{"from":3,"to":12}},
+		{"event_type":"pause","track_stem":"01. Intro","position_seconds":12,"metadata":{"duration":200}},
+		{"event_type":"play","track_stem":"not-in-album"},
+		{"event_type":"pause","track_stem":"01. Intro","position_seconds":12,"metadata":{"duration":-1}}
+	]`)
+	if err := c.RecordBatch(testSessionID, data, 0, testStems); err != nil {
+		t.Fatalf("RecordBatch: %v", err)
+	}
+	c.Close()
+
+	var types string
+	db.QueryRow("SELECT group_concat(event_type) FROM events WHERE session_id = ?", testSessionID).Scan(&types)
+	if types != "seek,pause" {
+		t.Fatalf("stored events = %q, want seek,pause", types)
+	}
+}
+
+func TestRecordBatchDeadlineCoversWholeBatch(t *testing.T) {
+	// No flush loop: the channel stays full, so every high-value event must drop.
+	c := &Collector{events: make(chan Event, 1), done: make(chan struct{})}
+	c.events <- Event{EventType: "heartbeat"}
+
+	data := []byte(`[
+		{"event_type":"play","track_stem":"01-gathering"},
+		{"event_type":"play","track_stem":"01-gathering"},
+		{"event_type":"play","track_stem":"01-gathering"}
+	]`)
+	done := make(chan error, 1)
+	go func() { done <- c.RecordBatch(testSessionID, data, 0, testStems) }()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("RecordBatch still blocked after 2s: the deadline fired only for the first event")
+	}
+	if c.DroppedCount() != 3 {
+		t.Fatalf("dropped %d, want 3", c.DroppedCount())
+	}
+}
+
+func TestDropoutHeatmapBinsByDuration(t *testing.T) {
+	db, err := database.Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	for _, e := range []struct {
+		pos  float64
+		meta string
+	}{
+		{30, `{"duration":300}`},    // 10% -> bin 1
+		{150, `{"duration":300}`},   // 50% -> bin 5
+		{100, `{"duration":1e-18}`}, // absurd ratio stored before validation -> last bin, no panic
+		{60, `{}`},                  // no duration: falls back to the longest known (300) -> bin 2
+	} {
+		db.Exec("INSERT INTO events (session_id, event_type, track_stem, position_seconds, metadata) VALUES ('s', 'dropout', 'a', ?, ?)", e.pos, e.meta)
+	}
+
+	bins, err := GetDropoutHeatmapFiltered(db, "a", QueryFilter{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := make([]int, len(bins))
+	for i, b := range bins {
+		got[i] = b.Count
+	}
+	want := []int{0, 1, 1, 0, 0, 1, 0, 0, 0, 1}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("bins = %v, want %v", got, want)
+		}
 	}
 }

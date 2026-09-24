@@ -6,11 +6,9 @@ import (
 	"fmt"
 	"log"
 	"net/http"
-	"strconv"
 	"strings"
 	"time"
 
-	"github.com/go-chi/chi/v5"
 	"golang.org/x/crypto/bcrypt"
 )
 
@@ -64,16 +62,14 @@ func (s *Server) handleAdminCreateUser(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		switch {
 		case errors.Is(err, errAdminWeakPassword):
-			jsonError(w, "password does not meet policy", http.StatusBadRequest)
+			jsonError(w, err.Error(), http.StatusBadRequest)
 		case errors.Is(err, errAdminUserExists):
 			jsonError(w, "username already exists", http.StatusConflict)
+		case errors.Is(err, errAdminInvalidUsername):
+			jsonError(w, err.Error(), http.StatusBadRequest)
 		default:
-			if strings.Contains(strings.ToLower(err.Error()), "username") {
-				jsonError(w, "invalid username", http.StatusBadRequest)
-			} else {
-				log.Printf("create admin user error: %v", err)
-				jsonError(w, "internal error", http.StatusInternalServerError)
-			}
+			log.Printf("create admin user error: %v", err)
+			jsonError(w, "internal error", http.StatusInternalServerError)
 		}
 		return
 	}
@@ -82,9 +78,8 @@ func (s *Server) handleAdminCreateUser(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleAdminUpdateUser(w http.ResponseWriter, r *http.Request) {
-	targetID, err := strconv.ParseInt(strings.TrimSpace(chi.URLParam(r, "id")), 10, 64)
-	if err != nil || targetID <= 0 {
-		jsonError(w, "bad request", http.StatusBadRequest)
+	targetID, ok := urlID(w, r)
+	if !ok {
 		return
 	}
 
@@ -116,13 +111,11 @@ func (s *Server) handleAdminUpdateUser(w http.ResponseWriter, r *http.Request) {
 			errors.Is(err, errAdminLastActiveAdmin),
 			errors.Is(err, errAdminFounderProtected):
 			jsonError(w, err.Error(), http.StatusBadRequest)
+		case errors.Is(err, errAdminInvalidUsername):
+			jsonError(w, err.Error(), http.StatusBadRequest)
 		default:
-			if strings.Contains(strings.ToLower(err.Error()), "username") {
-				jsonError(w, "invalid username", http.StatusBadRequest)
-			} else {
-				log.Printf("update admin user error: %v", err)
-				jsonError(w, "internal error", http.StatusInternalServerError)
-			}
+			log.Printf("update admin user error: %v", err)
+			jsonError(w, "internal error", http.StatusInternalServerError)
 		}
 		return
 	}

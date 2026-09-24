@@ -11,6 +11,8 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
+	"log"
 	"net/http"
 	"net/url"
 	"os"
@@ -20,9 +22,9 @@ import (
 	"strings"
 	"time"
 
+	"acetate/internal/album"
 	"acetate/internal/albums"
 	"acetate/internal/analytics"
-	"acetate/internal/config"
 )
 
 type reconcileTrack struct {
@@ -51,7 +53,7 @@ type reconcileApplyResult struct {
 }
 
 func (s *Server) recordAdminAuthAttempt(r *http.Request, attemptedUsername, outcome, reason string) {
-	clientIP := s.cfIPs.GetClientIP(r)
+	clientIP := s.clientIPs.ClientIP(r)
 	ipHash := hashForAudit(clientIP)
 	uaHash := hashForAudit(strings.TrimSpace(r.UserAgent()))
 
@@ -93,6 +95,14 @@ func parseAnalyticsFilter(values url.Values) (analytics.QueryFilter, error) {
 
 	if filter.From != nil && filter.To != nil && !filter.From.Before(*filter.To) {
 		return filter, errors.New("from must be before to")
+	}
+
+	if raw := strings.TrimSpace(values.Get("album_id")); raw != "" {
+		id, err := strconv.ParseInt(raw, 10, 64)
+		if err != nil || id <= 0 {
+			return filter, errors.New("invalid album_id")
+		}
+		filter.AlbumID = &id
 	}
 
 	filter.Stems = splitCSV(values.Get("stems"))
@@ -169,14 +179,13 @@ func (s *Server) handleAdminReconcilePreview(w http.ResponseWriter, r *http.Requ
 		jsonError(w, "internal error", http.StatusInternalServerError)
 		return
 	}
-	diskTracks, err := config.ScanAlbumTracks(alb.AlbumPath)
+	diskTracks, err := album.ScanTracks(alb.AlbumPath)
 	if err != nil {
 		jsonError(w, "internal error", http.StatusInternalServerError)
 		return
 	}
 
-	configTracks := albumTracksToConfigTracks(dbTracks)
-	report := buildReconcileReport(configTracks, diskTracks)
+	report := buildReconcileReport(dbTracks, diskTracks)
 	jsonOK(w, report)
 }
 
@@ -200,21 +209,20 @@ func (s *Server) handleAdminReconcileApply(w http.ResponseWriter, r *http.Reques
 		jsonError(w, "internal error", http.StatusInternalServerError)
 		return
 	}
-	diskTracks, err := config.ScanAlbumTracks(alb.AlbumPath)
+	diskTracks, err := album.ScanTracks(alb.AlbumPath)
 	if err != nil {
 		jsonError(w, "internal error", http.StatusInternalServerError)
 		return
 	}
 
-	configTracks := albumTracksToConfigTracks(dbTracks)
-	updatedConfigTracks, applied := applyReconcile(configTracks, diskTracks, req.AdoptMetadataTitles, req.KeepMissing)
+	updated, applied := applyReconcile(dbTracks, diskTracks, req.AdoptMetadataTitles, req.KeepMissing)
 
-	if err := s.albumStore.SetTracks(alb.ID, configTracksToAlbumTracks(updatedConfigTracks)); err != nil {
+	if err := s.albumStore.SetTracks(alb.ID, updated); err != nil {
 		jsonError(w, "internal error", http.StatusInternalServerError)
 		return
 	}
 
-	report := buildReconcileReport(updatedConfigTracks, diskTracks)
+	report := buildReconcileReport(updated, diskTracks)
 	jsonOK(w, map[string]interface{}{
 		"status":  "ok",
 		"applied": applied,
@@ -222,36 +230,18 @@ func (s *Server) handleAdminReconcileApply(w http.ResponseWriter, r *http.Reques
 	})
 }
 
-// configTracksToAlbumTracks converts config.Track to albums.Track, numbering sort order by position.
-func configTracksToAlbumTracks(tracks []config.Track) []albums.Track {
-	out := make([]albums.Track, len(tracks))
-	for i, t := range tracks {
-		out[i] = albums.Track{Stem: t.Stem, Title: t.Title, DisplayIndex: t.DisplayIndex, SortOrder: i}
-	}
-	return out
-}
-
-// albumTracksToConfigTracks converts albums.Track to config.Track for reconciliation.
-func albumTracksToConfigTracks(tracks []albums.Track) []config.Track {
-	out := make([]config.Track, len(tracks))
-	for i, t := range tracks {
-		out[i] = config.Track{Stem: t.Stem, Title: t.Title, DisplayIndex: t.DisplayIndex}
-	}
-	return out
-}
-
-func buildReconcileReport(configTracks, albumTracks []config.Track) reconcileReport {
+func buildReconcileReport(configTracks, albumTracks []albums.Track) reconcileReport {
 	report := reconcileReport{
 		ConfigCount: len(configTracks),
 		AlbumCount:  len(albumTracks),
 	}
 
-	configMap := make(map[string]config.Track, len(configTracks))
+	configMap := make(map[string]albums.Track, len(configTracks))
 	for _, t := range configTracks {
 		configMap[t.Stem] = t
 	}
 
-	albumMap := make(map[string]config.Track, len(albumTracks))
+	albumMap := make(map[string]albums.Track, len(albumTracks))
 	for _, t := range albumTracks {
 		albumMap[t.Stem] = t
 	}
@@ -284,15 +274,15 @@ func buildReconcileReport(configTracks, albumTracks []config.Track) reconcileRep
 	return report
 }
 
-func applyReconcile(current, albumTracks []config.Track, adoptTitles, keepMissing bool) ([]config.Track, reconcileApplyResult) {
-	albumMap := make(map[string]config.Track, len(albumTracks))
+func applyReconcile(current, albumTracks []albums.Track, adoptTitles, keepMissing bool) ([]albums.Track, reconcileApplyResult) {
+	albumMap := make(map[string]albums.Track, len(albumTracks))
 	for _, t := range albumTracks {
 		albumMap[t.Stem] = t
 	}
 
 	result := reconcileApplyResult{}
 	seen := make(map[string]struct{}, len(current))
-	updated := make([]config.Track, 0, len(albumTracks))
+	updated := make([]albums.Track, 0, len(albumTracks))
 
 	for _, t := range current {
 		albumTrack, ok := albumMap[t.Stem]
@@ -382,11 +372,6 @@ func (s *Server) handleAdminOpsStats(w http.ResponseWriter, r *http.Request) {
 		jsonError(w, "internal error", http.StatusInternalServerError)
 		return
 	}
-	rollups, err := queryCount(s.db, "SELECT COUNT(*) FROM analytics_rollups_daily")
-	if err != nil {
-		jsonError(w, "internal error", http.StatusInternalServerError)
-		return
-	}
 	auditRows, err := queryCount(s.db, "SELECT COUNT(*) FROM admin_auth_audit")
 	if err != nil {
 		jsonError(w, "internal error", http.StatusInternalServerError)
@@ -402,7 +387,6 @@ func (s *Server) handleAdminOpsStats(w http.ResponseWriter, r *http.Request) {
 			"sessions":       sessions,
 			"admin_sessions": adminSessions,
 			"events":         events,
-			"rollups":        rollups,
 			"auth_audit":     auditRows,
 		},
 		"database": map[string]interface{}{
@@ -470,13 +454,14 @@ func (s *Server) handleAdminExportEvents(w http.ResponseWriter, r *http.Request)
 	if format == "" {
 		format = "json"
 	}
-	if format != "json" && format != "csv" {
+	contentType := map[string]string{"json": "application/json", "csv": "text/csv; charset=utf-8"}[format]
+	if contentType == "" {
 		jsonError(w, "bad request", http.StatusBadRequest)
 		return
 	}
 
 	limit := parseOptionalInt(r.URL.Query().Get("limit"), 0)
-	if limit < 0 || limit > 200000 {
+	if limit < 0 {
 		jsonError(w, "bad request", http.StatusBadRequest)
 		return
 	}
@@ -485,32 +470,18 @@ func (s *Server) handleAdminExportEvents(w http.ResponseWriter, r *http.Request)
 	_ = s.collector.FlushNow(flushCtx)
 	cancel()
 
-	events, err := analytics.GetEventsForExport(s.db, filter, limit)
+	started := false
+	err = analytics.ExportEvents(w, s.db, filter, limit, format, func() {
+		started = true
+		allowLongWrite(w)
+		w.Header().Set("Content-Type", contentType)
+		w.Header().Set("Content-Disposition", fmt.Sprintf(`attachment; filename="analytics-events-%s.%s"`, time.Now().UTC().Format("20060102-150405"), format))
+	})
 	if err != nil {
-		jsonError(w, "internal error", http.StatusInternalServerError)
-		return
-	}
-
-	now := time.Now().UTC().Format("20060102-150405")
-	switch format {
-	case "json":
-		payload, err := analytics.MarshalEventsJSON(events)
-		if err != nil {
+		log.Printf("export events error: %v", err)
+		if !started {
 			jsonError(w, "internal error", http.StatusInternalServerError)
-			return
 		}
-		w.Header().Set("Content-Type", "application/json")
-		w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=\"analytics-events-%s.json\"", now))
-		_, _ = w.Write(payload)
-	case "csv":
-		payload, err := analytics.MarshalEventsCSV(events)
-		if err != nil {
-			jsonError(w, "internal error", http.StatusInternalServerError)
-			return
-		}
-		w.Header().Set("Content-Type", "text/csv; charset=utf-8")
-		w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=\"analytics-events-%s.csv\"", now))
-		_, _ = w.Write(payload)
 	}
 }
 
@@ -519,94 +490,78 @@ func (s *Server) handleAdminExportBackup(w http.ResponseWriter, r *http.Request)
 	_ = s.collector.FlushNow(flushCtx)
 	cancel()
 
-	tmpDB, cleanup, err := s.createDatabaseSnapshot()
+	snapshot, err := s.createDatabaseSnapshot()
 	if err != nil {
+		log.Printf("backup snapshot error: %v", err)
 		jsonError(w, "internal error", http.StatusInternalServerError)
 		return
 	}
-	defer cleanup()
+	defer os.Remove(snapshot)
 
-	payload, err := s.buildBackupZip(tmpDB)
-	if err != nil {
-		jsonError(w, "internal error", http.StatusInternalServerError)
-		return
-	}
-
-	now := time.Now().UTC().Format("20060102-150405")
+	allowLongWrite(w)
 	w.Header().Set("Content-Type", "application/zip")
-	w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=\"acetate-backup-%s.zip\"", now))
-	_, _ = w.Write(payload)
+	w.Header().Set("Content-Disposition", fmt.Sprintf(`attachment; filename="acetate-backup-%s.zip"`, time.Now().UTC().Format("20060102-150405")))
+	if err := s.writeBackupZip(w, snapshot); err != nil {
+		log.Printf("backup zip error: %v", err)
+	}
 }
 
-func (s *Server) createDatabaseSnapshot() (string, func(), error) {
-	tmp, err := os.CreateTemp("", "acetate-backup-*.db")
+// allowLongWrite extends the server's write timeout for a large download. It
+// stays finite: a stalled client must not hold a database cursor forever.
+func allowLongWrite(w http.ResponseWriter) {
+	_ = http.NewResponseController(w).SetWriteDeadline(time.Now().Add(30 * time.Minute))
+}
+
+// createDatabaseSnapshot writes a consistent copy of the database to a temp
+// file and returns its path.
+func (s *Server) createDatabaseSnapshot() (string, error) {
+	dir, err := os.MkdirTemp("", "acetate-backup-")
 	if err != nil {
-		return "", nil, err
+		return "", err
 	}
-	tmpPath := tmp.Name()
-	_ = tmp.Close()
-	_ = os.Remove(tmpPath)
-
-	if _, err := s.db.Exec("PRAGMA wal_checkpoint(FULL)"); err != nil {
-		return "", nil, err
+	path := filepath.Join(dir, "acetate.db")
+	if _, err := s.db.Exec("VACUUM INTO ?", path); err != nil {
+		os.RemoveAll(dir)
+		return "", err
 	}
-
-	quoted := strings.ReplaceAll(tmpPath, "'", "''")
-	if _, err := s.db.Exec("VACUUM INTO '" + quoted + "'"); err != nil {
-		return "", nil, err
-	}
-
-	cleanup := func() {
-		_ = os.Remove(tmpPath)
-	}
-	return tmpPath, cleanup, nil
+	return path, nil
 }
 
-func (s *Server) buildBackupZip(snapshotDBPath string) ([]byte, error) {
-	buf := &bytes.Buffer{}
-	zw := zip.NewWriter(buf)
+// writeBackupZip streams the database snapshot and uploaded covers as a zip.
+func (s *Server) writeBackupZip(w io.Writer, snapshotPath string) error {
+	defer os.RemoveAll(filepath.Dir(snapshotPath))
+	zw := zip.NewWriter(w)
 
-	if err := addFileToZip(zw, snapshotDBPath, "acetate.db"); err != nil {
-		_ = zw.Close()
-		return nil, err
+	if err := addFileToZip(zw, snapshotPath, "acetate.db"); err != nil {
+		return err
 	}
 
-	configPath := filepath.Join(s.dataPath, "config.json")
-	if _, err := os.Stat(configPath); err == nil {
-		if err := addFileToZip(zw, configPath, "config.json"); err != nil {
-			_ = zw.Close()
-			return nil, err
+	coversDir := filepath.Join(s.dataPath, "covers")
+	err := filepath.WalkDir(coversDir, func(path string, d fs.DirEntry, err error) error {
+		if err != nil || d.IsDir() {
+			return err
 		}
-	}
-
-	coverPath := filepath.Join(s.dataPath, "cover_override.jpg")
-	if _, err := os.Stat(coverPath); err == nil {
-		if err := addFileToZip(zw, coverPath, "cover_override.jpg"); err != nil {
-			_ = zw.Close()
-			return nil, err
+		rel, err := filepath.Rel(s.dataPath, path)
+		if err != nil {
+			return err
 		}
+		return addFileToZip(zw, path, filepath.ToSlash(rel))
+	})
+	if err != nil && !errors.Is(err, fs.ErrNotExist) {
+		return err
 	}
 
-	manifest := map[string]interface{}{
+	manifest, err := zw.Create("manifest.json")
+	if err != nil {
+		return err
+	}
+	if err := json.NewEncoder(manifest).Encode(map[string]interface{}{
 		"exported_at_utc":          time.Now().UTC().Format(time.RFC3339),
 		"analytics_retention_days": s.analyticsRetentionDays,
-		"uptime_seconds":           int(time.Since(s.startedAt).Seconds()),
+	}); err != nil {
+		return err
 	}
-	manifestBytes, _ := json.MarshalIndent(manifest, "", "  ")
-	w, err := zw.Create("manifest.json")
-	if err != nil {
-		_ = zw.Close()
-		return nil, err
-	}
-	if _, err := w.Write(manifestBytes); err != nil {
-		_ = zw.Close()
-		return nil, err
-	}
-
-	if err := zw.Close(); err != nil {
-		return nil, err
-	}
-	return buf.Bytes(), nil
+	return zw.Close()
 }
 
 func addFileToZip(zw *zip.Writer, sourcePath, zipPath string) error {

@@ -17,16 +17,12 @@
 * { margin: 0; padding: 0; box-sizing: border-box; }
 
 :root {
-    --bg0: #0b0a09;
-    --bg1: #0a0908;
-    --panel: #13110f;
-    --panel-alt: #181512;
+    --bg: #080706;
     --border: rgba(212, 207, 196, 0.16);
     --text: #d4cfc4;
     --muted: rgba(212, 207, 196, 0.7);
     --soft: rgba(212, 207, 196, 0.5);
     --accent: #8a7a5a;
-    --accent-2: #b69f74;
     --success: #9db78a;
     --danger: #c98784;
     --danger-soft: rgba(201, 135, 132, 0.14);
@@ -64,13 +60,12 @@ body {
     padding: 28px 22px 40px;
     max-width: 1140px;
     margin: 0 auto;
-    background: transparent;
 }
 
 html,
 body {
     min-height: 100%;
-    background: #080706;
+    background: var(--bg);
 }
 
 h1 {
@@ -144,6 +139,7 @@ header {
 input[type="text"],
 input[type="password"],
 select {
+    min-width: 0;
     background: rgba(255, 255, 255, 0.03);
     border: 1px solid var(--border);
     color: var(--text);
@@ -164,7 +160,7 @@ select:focus {
 }
 
 select option {
-    background: var(--bg, #1a1a1a);
+    background: var(--bg);
     color: var(--text);
 }
 
@@ -252,7 +248,7 @@ button:disabled {
 
 .config-grid {
     display: grid;
-    grid-template-columns: repeat(2, minmax(0, 1fr));
+    grid-template-columns: repeat(3, minmax(0, 1fr));
     gap: 12px;
 }
 
@@ -263,8 +259,7 @@ button:disabled {
     padding: 10px 11px;
 }
 
-.config-item label {
-    display: block;
+.config-item dt {
     font-size: 0.71rem;
     color: var(--soft);
     text-transform: uppercase;
@@ -272,7 +267,7 @@ button:disabled {
     margin-bottom: 3px;
 }
 
-.config-item span {
+.config-item dd {
     font-size: 0.9rem;
 }
 
@@ -280,8 +275,10 @@ button:disabled {
     margin: 12px 0;
 }
 
-.track-item {
+.track-item,
+.list-row {
     display: flex;
+    flex-wrap: wrap;
     align-items: center;
     gap: 12px;
     padding: 8px 12px;
@@ -289,10 +286,41 @@ button:disabled {
     border: 1px solid var(--border);
     border-radius: 8px;
     margin-bottom: 6px;
-    cursor: grab;
 }
 
+.track-item { cursor: grab; }
 .track-item:active { cursor: grabbing; }
+
+.list-row.is-selected {
+    border-color: var(--accent);
+    background: rgba(138, 122, 90, 0.12);
+}
+
+.album-row-title {
+    font-weight: 600;
+}
+
+.row-meta,
+.muted-note {
+    color: var(--soft);
+    font-size: 0.8rem;
+}
+
+.album-row-count {
+    margin-left: auto;
+}
+
+.password-row input {
+    flex: 1 1 160px;
+}
+
+.checkbox-grid {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 4px 6px;
+    width: 100%;
+}
 
 .track-item.dragging {
     opacity: 0.55;
@@ -312,11 +340,12 @@ button:disabled {
     min-width: 120px;
 }
 
-.track-item input {
-    flex: 1;
+.track-item .track-title-input {
+    flex: 1 1 160px;
 }
 
 .track-item .track-display-idx {
+    flex: 0 0 64px;
     width: 64px;
     text-align: center;
 }
@@ -446,9 +475,12 @@ button:disabled {
     white-space: pre-line;
 }
 
+.table-wrap {
+    overflow-x: auto;
+}
+
 .admin-users-table-wrap {
     margin-top: 12px;
-    overflow-x: auto;
 }
 
 .admin-users-table .admin-user-username {
@@ -565,6 +597,12 @@ button:disabled {
     padding: 4px 2px;
 }
 
+/* Status lines stay in the layout (not display:none) so screen readers announce updates. */
+.status:empty {
+    margin: 0;
+    padding: 0;
+}
+
 .status.success { color: var(--success); }
 .status.error { color: var(--danger); }
 
@@ -574,12 +612,6 @@ button:disabled {
     border: 1px solid rgba(201, 135, 132, 0.68);
     border-radius: 8px;
     background: var(--danger-soft);
-}
-
-.error {
-    color: var(--danger);
-    font-size: 0.85rem;
-    margin-top: 8px;
 }
 
 @media (max-width: 860px) {
@@ -595,6 +627,10 @@ button:disabled {
 
     .config-grid {
         grid-template-columns: 1fr;
+    }
+
+    .album-row-count {
+        margin-left: 0;
     }
 
     .track-meta-form {

@@ -43,6 +43,14 @@
             var li = document.createElement('li');
             li.dataset.index = index;
 
+            var btn = document.createElement('button');
+            btn.type = 'button';
+            btn.className = 'track-btn';
+            btn.addEventListener('click', function () {
+                AcetatePlayer.loadTrack(index);
+                AcetatePlayer.play();
+            });
+
             var num = document.createElement('span');
             num.className = 'track-num';
             num.textContent = track.display_index || String(index + 1);
@@ -51,8 +59,9 @@
             title.className = 'track-title-text';
             title.textContent = track.title;
 
-            li.appendChild(num);
-            li.appendChild(title);
+            btn.appendChild(num);
+            btn.appendChild(title);
+            li.appendChild(btn);
 
             if (downloadsEnabled) {
                 var dl = document.createElement('a');
@@ -62,27 +71,8 @@
                 dl.setAttribute('title', 'Download');
                 dl.setAttribute('download', '');
                 dl.innerHTML = '<svg width="14" height="14" viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M7 1v8.5"/><path d="M3.5 6.5 7 10l3.5-3.5"/><path d="M2 12h10"/></svg>';
-                dl.addEventListener('click', function (e) {
-                    e.stopPropagation();
-                });
                 li.appendChild(dl);
             }
-
-            li.tabIndex = 0;
-            li.setAttribute('role', 'button');
-            li.setAttribute('aria-label', 'Play ' + track.title);
-
-            li.addEventListener('click', function () {
-                AcetatePlayer.loadTrack(index);
-                AcetatePlayer.play();
-            });
-            li.addEventListener('keydown', function (e) {
-                if (e.key === 'Enter' || e.key === ' ') {
-                    e.preventDefault();
-                    AcetatePlayer.loadTrack(index);
-                    AcetatePlayer.play();
-                }
-            });
 
             items.appendChild(li);
         });
@@ -103,7 +93,7 @@
             }
         });
         if (activeLi && container) {
-            activeLi.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+            activeLi.scrollIntoView({ behavior: Acetate.scrollBehavior(), block: 'nearest' });
         }
     }
 

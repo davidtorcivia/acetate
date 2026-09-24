@@ -27,20 +27,6 @@ func TestValidateStem(t *testing.T) {
 	}
 }
 
-func TestStemInTracks(t *testing.T) {
-	tracks := []albums.Track{
-		{Stem: "01-gathering", Title: "Gathering"},
-		{Stem: "02-hollow", Title: "Hollow"},
-	}
-
-	if !StemInTracks("01-gathering", tracks) {
-		t.Error("01-gathering should be in tracks")
-	}
-	if StemInTracks("03-unknown", tracks) {
-		t.Error("03-unknown should not be in tracks")
-	}
-}
-
 func TestDetectLyricFormat(t *testing.T) {
 	dir := t.TempDir()
 

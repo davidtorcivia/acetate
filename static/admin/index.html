@@ -13,11 +13,11 @@
         <h1>Acetate Admin</h1>
         <p class="panel-copy">Manage listening-room access, track metadata, and analytics.</p>
         <form id="login-form">
-            <input type="text" id="admin-username" placeholder="Username" autocomplete="username">
-            <input type="password" id="admin-password" placeholder="Password" autocomplete="current-password">
+            <input type="text" id="admin-username" placeholder="Username" aria-label="Username" autocomplete="username" required>
+            <input type="password" id="admin-password" placeholder="Password" aria-label="Password" autocomplete="current-password" required>
             <button type="submit">Login</button>
         </form>
-        <div id="login-error" class="error hidden"></div>
+        <div id="login-error" class="status" role="status" aria-live="polite"></div>
     </div>
 
     <!-- First-time setup -->
@@ -25,41 +25,44 @@
         <h1>Acetate Setup</h1>
         <p class="setup-copy">Create the first admin account.</p>
         <form id="setup-form">
-            <input type="text" id="setup-username" placeholder="Admin username" autocomplete="username">
-            <input type="password" id="setup-password" placeholder="Admin password" autocomplete="new-password">
-            <input type="password" id="setup-password-confirm" placeholder="Confirm admin password" autocomplete="new-password">
+            <input type="text" id="setup-username" placeholder="Admin username" aria-label="Admin username" aria-describedby="setup-username-hint" autocomplete="username" required>
+            <p id="setup-username-hint" class="inline-note">3-64 characters: a-z, 0-9, '.', '_' or '-'.</p>
+            <input type="password" id="setup-password" placeholder="Admin password" aria-label="Admin password" aria-describedby="setup-password-hint" autocomplete="new-password" required>
+            <input type="password" id="setup-password-confirm" placeholder="Confirm admin password" aria-label="Confirm admin password" autocomplete="new-password" required>
+            <p id="setup-password-hint" class="inline-note">12-72 characters, at least one letter and one digit.</p>
             <button type="submit">Create Admin Account</button>
         </form>
-        <div id="setup-error" class="error hidden"></div>
+        <div id="setup-error" class="status" role="status" aria-live="polite"></div>
     </div>
 
     <!-- Dashboard -->
     <div id="admin-dashboard" class="hidden">
         <header>
             <h1>Acetate Admin</h1>
-            <button id="btn-logout" class="btn-small">Logout</button>
+            <button type="button" id="btn-logout" class="btn-small">Logout</button>
         </header>
+        <div id="dashboard-status" class="status" role="status" aria-live="polite"></div>
         <div id="password-reset-banner" class="status error hidden">
             Password reset required. Update your admin password to continue.
         </div>
 
         <!-- Config Section -->
-        <section id="section-config" class="section">
+        <section class="section">
             <h2>Overview</h2>
-            <div class="config-grid">
+            <dl class="config-grid">
                 <div class="config-item">
-                    <label>Admin User</label>
-                    <span id="cfg-admin-user"></span>
+                    <dt>Admin User</dt>
+                    <dd id="cfg-admin-user"></dd>
                 </div>
                 <div class="config-item">
-                    <label>Albums</label>
-                    <span id="cfg-album-count"></span>
+                    <dt>Albums</dt>
+                    <dd id="cfg-album-count"></dd>
                 </div>
                 <div class="config-item">
-                    <label>Passwords</label>
-                    <span id="cfg-password-count"></span>
+                    <dt>Passwords</dt>
+                    <dd id="cfg-password-count"></dd>
                 </div>
-            </div>
+            </dl>
         </section>
 
         <!-- Albums Section -->
@@ -69,12 +72,12 @@
             <div id="albums-list"></div>
             <h3>Create Album</h3>
             <form id="album-create-form" class="inline-form">
-                <input type="text" id="new-album-title" placeholder="Title" autocomplete="off">
-                <input type="text" id="new-album-artist" placeholder="Artist" autocomplete="off">
-                <select id="new-album-path"><option value="">Select album folder…</option></select>
+                <input type="text" id="new-album-title" placeholder="Title" aria-label="Album title" autocomplete="off" required>
+                <input type="text" id="new-album-artist" placeholder="Artist" aria-label="Artist" autocomplete="off">
+                <select id="new-album-path" aria-label="Album folder" required><option value="">Select album folder…</option></select>
                 <button type="submit">Create Album</button>
             </form>
-            <div id="albums-status" class="status hidden"></div>
+            <div id="albums-status" class="status" role="status" aria-live="polite"></div>
         </section>
 
         <!-- Passwords Section -->
@@ -84,23 +87,25 @@
             <div id="passwords-list"></div>
             <h3>Create Password</h3>
             <form id="password-create-form" class="inline-form">
-                <input type="text" id="new-password-label" placeholder="Label" autocomplete="off">
-                <input type="password" id="new-password-passphrase" placeholder="Passphrase" autocomplete="new-password">
+                <input type="text" id="new-password-label" placeholder="Label" aria-label="Label" autocomplete="off" required>
+                <input type="password" id="new-password-passphrase" placeholder="Passphrase" aria-label="Passphrase" autocomplete="new-password" required>
+                <div id="password-album-checkboxes" class="checkbox-grid"></div>
                 <button type="submit">Create Password</button>
             </form>
-            <div id="password-album-checkboxes" class="checkbox-grid"></div>
-            <div id="passwords-status" class="status hidden"></div>
+            <div id="passwords-status" class="status" role="status" aria-live="polite"></div>
         </section>
 
         <!-- Admin Password Section -->
-        <section id="section-admin-password" class="section">
+        <section class="section">
             <h2>Update Admin Password</h2>
             <form id="admin-password-form" class="inline-form">
-                <input type="password" id="current-admin-password" placeholder="Current password" autocomplete="current-password">
-                <input type="password" id="new-admin-password" placeholder="New admin password" autocomplete="new-password">
+                <input type="password" id="current-admin-password" placeholder="Current password" aria-label="Current password" autocomplete="current-password" required>
+                <input type="password" id="new-admin-password" placeholder="New admin password" aria-label="New admin password" aria-describedby="admin-password-hint" autocomplete="new-password" required>
+                <input type="password" id="confirm-admin-password" placeholder="Confirm new password" aria-label="Confirm new password" autocomplete="new-password" required>
                 <button type="submit">Update</button>
             </form>
-            <div id="admin-password-status" class="status hidden"></div>
+            <p id="admin-password-hint" class="inline-note">12-72 characters, at least one letter and one digit.</p>
+            <div id="admin-password-status" class="status" role="status" aria-live="polite"></div>
         </section>
 
         <!-- Admin Users Section -->
@@ -108,21 +113,22 @@
             <h2>Admin Users</h2>
             <p class="section-copy">Add or update administrators. The original admin account cannot be deactivated.</p>
             <form id="admin-user-create-form" class="inline-form">
-                <input type="text" id="new-admin-username" placeholder="Username" autocomplete="off">
-                <input type="password" id="new-admin-user-password" placeholder="Temporary password" autocomplete="new-password">
+                <input type="text" id="new-admin-username" placeholder="Username" aria-label="New admin username" aria-describedby="new-admin-hint" autocomplete="off" required>
+                <input type="password" id="new-admin-user-password" placeholder="Temporary password" aria-label="Temporary password" aria-describedby="new-admin-hint" autocomplete="new-password" required>
                 <label class="checkbox-label">
                     <input type="checkbox" id="new-admin-force-reset" checked>
                     Force reset on first login
                 </label>
                 <button type="submit">Create Admin</button>
             </form>
-            <div id="admin-users-status" class="status hidden"></div>
+            <p id="new-admin-hint" class="inline-note">Usernames: 3-64 characters of a-z, 0-9, '.', '_' or '-'. Passwords: 12-72 characters, at least one letter and one digit.</p>
+            <div id="admin-users-status" class="status" role="status" aria-live="polite"></div>
             <div id="admin-users-list"></div>
         </section>
 
         <!-- Album Detail: Settings (only visible when album selected) -->
         <section id="section-album-settings" class="section hidden">
-            <h2>Album Settings <span id="settings-album-label" class="section-album-label"></span></h2>
+            <h2 tabindex="-1">Album Settings <span id="settings-album-label" class="section-album-label"></span></h2>
             <div class="album-settings-grid">
                 <div class="album-setting-item">
                     <label class="switch-label">
@@ -132,17 +138,18 @@
                     <p class="inline-note">Show a download button next to each track in the listener view.</p>
                 </div>
             </div>
-            <div id="album-settings-status" class="status hidden"></div>
+            <div id="album-settings-status" class="status" role="status" aria-live="polite"></div>
         </section>
 
         <!-- Album Detail: Cover Art (only visible when album selected) -->
         <section id="section-cover" class="section hidden">
             <h2>Cover Art <span id="cover-album-label" class="section-album-label"></span></h2>
             <form id="cover-form" class="inline-form">
-                <input type="file" id="cover-file" accept="image/jpeg,image/png">
+                <input type="file" id="cover-file" accept="image/jpeg,image/png" aria-label="Cover image" aria-describedby="cover-hint" required>
                 <button type="submit">Upload</button>
             </form>
-            <div id="cover-status" class="status hidden"></div>
+            <p id="cover-hint" class="inline-note">JPEG or PNG, up to 10 MB and 4096x4096 pixels.</p>
+            <div id="cover-status" class="status" role="status" aria-live="polite"></div>
         </section>
 
         <!-- Album Detail: Tracks (only visible when album selected) -->
@@ -151,7 +158,8 @@
             <div class="track-meta-form">
                 <div class="field">
                     <label for="album-title">Album Title</label>
-                    <input type="text" id="album-title">
+                    <input type="text" id="album-title" aria-describedby="album-title-hint">
+                    <p id="album-title-hint" class="inline-note">Changing the title also changes the album's listener URL.</p>
                 </div>
                 <div class="field">
                     <label for="album-artist">Artist</label>
@@ -160,11 +168,11 @@
             </div>
             <div id="reconcile-bar" class="reconcile-bar hidden">
                 <span id="reconcile-summary"></span>
-                <button id="btn-reconcile-apply" class="btn-primary">Import Tracks from Disk</button>
+                <button type="button" id="btn-reconcile-apply" class="btn-primary">Import Tracks from Disk</button>
             </div>
             <div id="track-list" class="track-list"></div>
-            <button id="btn-save-tracks" class="btn-primary">Save Track Order</button>
-            <div id="tracks-status" class="status hidden"></div>
+            <button type="button" id="btn-save-tracks" class="btn-primary">Save Track Order</button>
+            <div id="tracks-status" class="status" role="status" aria-live="polite"></div>
         </section>
 
         <!-- Album Detail: Analytics (only visible when album selected) -->
@@ -172,31 +180,35 @@
             <h2>Analytics <span id="analytics-album-label" class="section-album-label"></span></h2>
             <div id="analytics-overview" class="analytics-overview"></div>
             <h3>Per-Track Stats</h3>
-            <table id="track-stats-table" class="data-table">
-                <thead>
-                    <tr>
-                        <th>Track</th>
-                        <th>Plays</th>
-                        <th>Sessions</th>
-                        <th>Completions</th>
-                        <th>Rate</th>
-                        <th>Dropout Heatmap</th>
-                    </tr>
-                </thead>
-                <tbody id="track-stats-body"></tbody>
-            </table>
+            <div class="table-wrap">
+                <table class="data-table">
+                    <thead>
+                        <tr>
+                            <th>Track</th>
+                            <th>Plays</th>
+                            <th>Sessions</th>
+                            <th>Completions</th>
+                            <th>Rate</th>
+                            <th>Dropout Heatmap</th>
+                        </tr>
+                    </thead>
+                    <tbody id="track-stats-body"></tbody>
+                </table>
+            </div>
             <h3>Recent Sessions</h3>
-            <table id="sessions-table" class="data-table">
-                <thead>
-                    <tr>
-                        <th>Started</th>
-                        <th>Last Seen</th>
-                        <th>Tracks Heard</th>
-                        <th>IP Hash</th>
-                    </tr>
-                </thead>
-                <tbody id="sessions-body"></tbody>
-            </table>
+            <div class="table-wrap">
+                <table class="data-table">
+                    <thead>
+                        <tr>
+                            <th>Started</th>
+                            <th>Last Seen</th>
+                            <th>Tracks Heard</th>
+                            <th>IP Hash</th>
+                        </tr>
+                    </thead>
+                    <tbody id="sessions-body"></tbody>
+                </table>
+            </div>
         </section>
     </div>
 

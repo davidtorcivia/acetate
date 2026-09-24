@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"io"
 	"log"
 	"net/http"
 	"net/url"
@@ -11,6 +12,7 @@ import (
 	"github.com/go-chi/chi/v5"
 
 	"acetate/internal/albums"
+	"acetate/internal/auth"
 )
 
 type contextKey string
@@ -24,7 +26,7 @@ const (
 // requireSession checks for a valid listener session cookie and stores password_id in context.
 func (s *Server) requireSession(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		cookie, err := r.Cookie("acetate_session")
+		cookie, err := r.Cookie(listenerCookie)
 		if err != nil || cookie.Value == "" {
 			jsonError(w, "unauthorized", http.StatusUnauthorized)
 			return
@@ -38,15 +40,7 @@ func (s *Server) requireSession(next http.Handler) http.Handler {
 		}
 		if !valid {
 			// Clear invalid cookie
-			http.SetCookie(w, &http.Cookie{
-				Name:     "acetate_session",
-				Value:    "",
-				Path:     "/",
-				MaxAge:   -1,
-				HttpOnly: true,
-				Secure:   isSecureRequest(r),
-				SameSite: http.SameSiteStrictMode,
-			})
+			setListenerCookie(w, r, "", -1)
 			jsonError(w, "unauthorized", http.StatusUnauthorized)
 			return
 		}
@@ -72,24 +66,20 @@ func (s *Server) requireAlbumAccess(next http.Handler) http.Handler {
 			jsonError(w, "internal error", http.StatusInternalServerError)
 			return
 		}
+		// An album this passphrase cannot open answers exactly like a missing one,
+		// so slugs cannot be enumerated.
 		if alb == nil {
 			jsonError(w, "not found", http.StatusNotFound)
 			return
 		}
-
-		passwordID := passwordIDFromContext(r)
-		if passwordID <= 0 {
-			jsonError(w, "forbidden", http.StatusForbidden)
-			return
-		}
-		hasAccess, err := s.albumStore.PasswordHasAlbumAccess(passwordID, alb.ID)
+		hasAccess, err := s.albumStore.PasswordHasAlbumAccess(passwordIDFromContext(r), alb.ID)
 		if err != nil {
 			log.Printf("album access check error: %v", err)
 			jsonError(w, "internal error", http.StatusInternalServerError)
 			return
 		}
 		if !hasAccess {
-			jsonError(w, "forbidden", http.StatusForbidden)
+			jsonError(w, "not found", http.StatusNotFound)
 			return
 		}
 
@@ -101,30 +91,22 @@ func (s *Server) requireAlbumAccess(next http.Handler) http.Handler {
 // requireAdmin checks for a valid admin session cookie.
 func (s *Server) requireAdmin(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		cookie, err := r.Cookie("acetate_admin")
+		cookie, err := r.Cookie(adminCookie)
 		if err != nil || cookie.Value == "" {
 			jsonError(w, "unauthorized", http.StatusUnauthorized)
 			return
 		}
 
-		clientIP := s.cfIPs.GetClientIP(r)
+		clientIP := s.clientIPs.ClientIP(r)
 		userAgent := strings.TrimSpace(r.UserAgent())
-		valid, userID, needsPasswordReset, err := s.sessions.ValidateAdminSessionWithContext(cookie.Value, clientIP, userAgent)
+		valid, userID, needsPasswordReset, err := s.sessions.ValidateAdminSession(cookie.Value, auth.RateKey(clientIP), userAgent)
 		if err != nil {
 			log.Printf("admin session validate error: %v", err)
 			jsonError(w, "internal error", http.StatusInternalServerError)
 			return
 		}
 		if !valid {
-			http.SetCookie(w, &http.Cookie{
-				Name:     "acetate_admin",
-				Value:    "",
-				Path:     "/admin",
-				MaxAge:   -1,
-				HttpOnly: true,
-				Secure:   isSecureRequest(r),
-				SameSite: http.SameSiteStrictMode,
-			})
+			setAdminCookie(w, r, "", -1)
 			jsonError(w, "unauthorized", http.StatusUnauthorized)
 			return
 		}
@@ -236,6 +218,16 @@ type statusWriter struct {
 func (w *statusWriter) WriteHeader(code int) {
 	w.status = code
 	w.ResponseWriter.WriteHeader(code)
+}
+
+// ReadFrom keeps the underlying writer's sendfile path for MP3 streaming.
+func (w *statusWriter) ReadFrom(r io.Reader) (int64, error) {
+	return io.Copy(w.ResponseWriter, r)
+}
+
+// Unwrap lets http.ResponseController reach the underlying writer.
+func (w *statusWriter) Unwrap() http.ResponseWriter {
+	return w.ResponseWriter
 }
 
 // cacheControl sets the Cache-Control header.
