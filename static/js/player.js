@@ -5,24 +5,27 @@
     var deckA, deckB;
     var activeDeck = null;      // currently playing <audio>
     var inactiveDeck = null;    // preloaded <audio>
-    var isPlaying = false;
+    var isPlaying = false;      // the active deck is actually producing audio
+    var playRequested = false;  // the listener asked to play (may still be buffering)
     var isSeeking = false;
     var warmedUp = false;
-    var rafId = null;
-    var lastPlayEventTrack = -1;
+    var loopRunning = false;
+    var playRecorded = false;
     var pendingSeekTime = null;
     var lastPersistAt = 0;
     var currentVolume = 1;
     var lastNonZeroVolume = 1;
     var isMuted = false;
-    var prefetchedTracks = Object.create(null);
     var PLAYBACK_STATE_KEY = 'acetate-playback-v1';
     var SEEK_STEP_SECONDS = 5;
     var VOLUME_STEP = 0.05;
     var URL_SYNC_MIN_INTERVAL_MS = 1800;
     var lastURLSyncAt = 0;
+    var urlSyncTimer = null;
+    var shownSecond = -1;
+    var shownDuration = -1;
 
-    var btnPlay, btnPrev, btnNext, btnMute, progress, volumeSlider, timeCurrent, timeTotal;
+    var btnPlay, btnPrev, btnNext, btnMute, progress, volumeSlider, timeCurrent, timeTotal, statusEl;
 
     window.AcetatePlayer = {
         loadTrack: loadTrack,
@@ -30,12 +33,10 @@
         pause: pause,
         isPlaying: function () { return isPlaying; },
         getActiveDeck: function () { return activeDeck; },
-        getCurrentTrackIndex: function () { return Acetate.currentTrackIndex; },
         seekTo: seekTo,
         seekBy: seekBy,
         adjustVolume: adjustVolume,
-        getStoredPlaybackState: getStoredPlaybackState,
-        persistPlaybackState: persistPlaybackState
+        getStoredPlaybackState: getStoredPlaybackState
     };
 
     function init() {
@@ -52,6 +53,7 @@
         volumeSlider = document.getElementById('volume');
         timeCurrent = document.getElementById('time-current');
         timeTotal = document.getElementById('time-total');
+        statusEl = document.getElementById('player-status');
 
         btnPlay.addEventListener('click', togglePlay);
         btnPrev.addEventListener('click', prevTrack);
@@ -60,10 +62,14 @@
 
         progress.addEventListener('input', onSeekInput);
         progress.addEventListener('change', onSeekChange);
-        if (volumeSlider) {
+        // iOS ignores programmatic volume (reads back 1); mute still works there.
+        deckA.volume = 0.5;
+        if (deckA.volume !== 0.5) {
+            volumeSlider.hidden = true;
+        } else {
             volumeSlider.addEventListener('input', onVolumeInput);
+            restoreVolumeState(getStoredPlaybackState());
         }
-        restoreVolumeState(getStoredPlaybackState());
 
         // Track ended — advance to next
         deckA.addEventListener('ended', onTrackEnded);
@@ -72,6 +78,13 @@
         // Duration available
         deckA.addEventListener('loadedmetadata', onMetadata);
         deckB.addEventListener('loadedmetadata', onMetadata);
+
+        // OS pauses (interruptions, unplugged headphones), resumes and stream errors.
+        [deckA, deckB].forEach(function (deck) {
+            deck.addEventListener('pause', onDeckStateChange);
+            deck.addEventListener('playing', onDeckStateChange);
+            deck.addEventListener('error', onDeckError);
+        });
 
         document.addEventListener('keydown', onPlayerKeydown);
         window.addEventListener('beforeunload', function () { persistPlaybackState(true); });
@@ -84,28 +97,21 @@
         applyVolume();
         updateVolumeUI();
         setPlayIcon();
-        startRAF();
+        renderFrame();
     }
 
     function warmUp() {
         if (warmedUp) return;
         warmedUp = true;
 
-        // iOS warm-up: play/pause both decks at volume 0
-        var origVolA = deckA.volume;
-        var origVolB = deckB.volume;
-        deckA.volume = 0;
-        deckB.volume = 0;
-
-        var pA = deckA.play();
-        if (pA) pA.catch(function () { });
-        deckA.pause();
-        deckA.volume = origVolA;
-
-        var pB = deckB.play();
-        if (pB) pB.catch(function () { });
-        deckB.pause();
-        deckB.volume = origVolB;
+        // iOS warm-up: play/pause both decks muted
+        [deckA, deckB].forEach(function (deck) {
+            deck.muted = true;
+            var p = deck.play();
+            if (p) p.catch(function () { });
+            deck.pause();
+        });
+        applyVolume();
 
         // Initialize oscilloscope after warm-up
         if (typeof AcetateOscilloscope !== 'undefined') {
@@ -121,11 +127,15 @@
 
         var track = tracks[index];
         Acetate.currentTrackIndex = index;
+        Acetate.notifyServiceWorker('AUTHENTICATED');
         pendingSeekTime = null;
+        playRecorded = false;
+        setStatus('');
         var targetURL = streamURL(track.stem);
 
-        // Set source on active deck (reuse preloaded deck when possible for instant transitions).
-        if (!isDeckSource(activeDeck, targetURL)) {
+        // Set source on active deck (reuse preloaded deck when possible for instant
+        // transitions); a deck that errored must reload to recover.
+        if (!isDeckSource(activeDeck, targetURL) || activeDeck.error) {
             activeDeck.src = targetURL;
             activeDeck.load();
         }
@@ -134,7 +144,6 @@
         document.getElementById('track-title').textContent = track.title;
         updateMediaSession(track);
 
-        // Preload next track on inactive deck, and prefetch one more track for instant transitions.
         preloadUpcoming(index);
 
         // Load lyrics
@@ -147,31 +156,47 @@
             AcetateTracklist.setActive(index);
         }
 
-        // Reset progress
-        progress.value = 0;
-        timeCurrent.textContent = '0:00';
-        timeTotal.textContent = '0:00';
-
-        if (typeof options.startTime === 'number' && options.startTime > 0) {
-            pendingSeekTime = options.startTime;
+        var startTime = (typeof options.startTime === 'number' && options.startTime > 0) ? options.startTime : 0;
+        if (startTime > 0) {
+            pendingSeekTime = startTime;
+            // Reused preloaded deck: loadedmetadata already fired and will not fire again.
+            if (activeDeck.readyState >= 1) applyPendingSeek();
         }
 
-        syncPlaybackURL(true, pendingSeekTime || 0);
+        renderFrame();
+        syncPlaybackURL(true, startTime);
         persistPlaybackState(false);
     }
 
+    function applyPendingSeek() {
+        if (pendingSeekTime === null || !activeDeck.duration) return;
+        activeDeck.currentTime = clamp(pendingSeekTime, 0, Math.max(0, activeDeck.duration - 0.05));
+        pendingSeekTime = null;
+    }
+
     function play() {
+        playRequested = true;
         warmUp();
 
         if (typeof AcetateOscilloscope !== 'undefined') {
             AcetateOscilloscope.resumeContext();
         }
 
-        var p = activeDeck.play();
+        // An errored element stays errored until it reloads; resume where it stopped.
+        if (activeDeck.error && activeDeck.src) {
+            pendingSeekTime = activeDeck.currentTime || null;
+            activeDeck.src = activeDeck.src;
+            activeDeck.load();
+        }
+
+        var deck = activeDeck;
+        var p = deck.play();
         if (p && typeof p.then === 'function') {
             p.then(function () {
                 onPlaybackStarted();
-            }).catch(function () {
+            }).catch(function (err) {
+                // A deck swap or reload aborts the old promise; that is not a block.
+                if (deck !== activeDeck || (err && err.name === 'AbortError')) return;
                 onPlaybackBlocked();
             });
             return;
@@ -179,48 +204,92 @@
         onPlaybackStarted();
     }
 
+    // Always stops the active deck, even while it is still buffering.
     function pause() {
-        activeDeck.pause();
+        if (!activeDeck) return; // app.js shows the gate before player init runs
+        var wasPlaying = isPlaying;
+        playRequested = false;
         isPlaying = false;
+        activeDeck.pause();
         setPlayIcon();
-        persistPlaybackState(false);
+        renderFrame();
+        persistPlaybackState(true);
 
-        if (typeof AcetateAnalytics !== 'undefined' && Acetate.albumData) {
-            var track = Acetate.albumData.tracks[Acetate.currentTrackIndex];
-            if (track) {
-                AcetateAnalytics.record('pause', track.stem, activeDeck.currentTime);
-            }
-        }
+        if (wasPlaying) recordTrackEvent('pause');
     }
 
     function onPlaybackStarted() {
-        var playTrackIndex = Acetate.currentTrackIndex;
-        var shouldRecordPlay = !isPlaying || playTrackIndex !== lastPlayEventTrack;
+        if (!playRequested || activeDeck.paused) return;
 
         isPlaying = true;
         setPauseIcon();
+        setStatus('');
+        startLoop();
 
         if (typeof AcetateOscilloscope !== 'undefined') {
             AcetateOscilloscope.setActiveDeck(activeDeck);
         }
 
-        if (shouldRecordPlay && typeof AcetateAnalytics !== 'undefined' && Acetate.albumData) {
-            var track = Acetate.albumData.tracks[playTrackIndex];
-            if (track) {
-                AcetateAnalytics.record('play', track.stem, activeDeck.currentTime || 0);
-                lastPlayEventTrack = playTrackIndex;
-            }
+        if (!playRecorded) {
+            playRecorded = true;
+            recordTrackEvent('play');
         }
         persistPlaybackState(false);
     }
 
     function onPlaybackBlocked() {
+        if (activeDeck.error) {
+            onDeckError({ target: activeDeck });
+            return;
+        }
+        playRequested = false;
         isPlaying = false;
         setPlayIcon();
     }
 
+    // Reads element state rather than trusting the event: pause events queued by our own
+    // src swaps arrive after the synchronous play() that follows them.
+    function onDeckStateChange(e) {
+        if (e.target !== activeDeck || activeDeck.ended) return;
+        if (!activeDeck.paused) {
+            if (!isPlaying) {
+                playRequested = true;
+                onPlaybackStarted();
+            }
+            return;
+        }
+        if (!playRequested) return;
+
+        var wasPlaying = isPlaying;
+        playRequested = false;
+        isPlaying = false;
+        setPlayIcon();
+        renderFrame();
+        persistPlaybackState(true);
+        if (wasPlaying) recordTrackEvent('pause');
+    }
+
+    function onDeckError(e) {
+        if (e.target !== activeDeck || !activeDeck.getAttribute('src')) return;
+        playRequested = false;
+        isPlaying = false;
+        setPlayIcon();
+        setStatus('Playback failed. Check your connection and try again.');
+        Acetate.checkSession();
+    }
+
+    function setStatus(message) {
+        if (statusEl && statusEl.textContent !== message) statusEl.textContent = message;
+    }
+
+    function recordTrackEvent(eventType, metadata) {
+        if (typeof AcetateAnalytics !== 'undefined') {
+            AcetateAnalytics.recordTrackEvent(eventType, metadata);
+        }
+    }
+
     function togglePlay() {
-        if (isPlaying) {
+        if (playRequested) {
             pause();
         } else {
             play();
@@ -238,7 +307,7 @@
         inactiveDeck = temp;
 
         loadTrack(next);
-        if (isPlaying) play();
+        if (playRequested) play();
     }
 
     function prevTrack() {
@@ -255,15 +324,14 @@
         }
 
         loadTrack(prev);
-        if (isPlaying) play();
+        if (playRequested) play();
     }
 
-    function onTrackEnded() {
-        if (!Acetate.albumData) return;
-        var track = Acetate.albumData.tracks[Acetate.currentTrackIndex];
-        if (track && typeof AcetateAnalytics !== 'undefined') {
-            AcetateAnalytics.record('complete', track.stem);
-        }
+    function onTrackEnded(e) {
+        if (!Acetate.albumData || e.target !== activeDeck) return;
+        recordTrackEvent('complete');
+        pendingSeekTime = null;
+        playRecorded = false;
 
         var next = Acetate.currentTrackIndex + 1;
         if (next < Acetate.albumData.tracks.length) {
@@ -273,6 +341,7 @@
             inactiveDeck = temp;
 
             Acetate.currentTrackIndex = next;
+            Acetate.notifyServiceWorker('AUTHENTICATED');
             var nextTrack = Acetate.albumData.tracks[next];
             document.getElementById('track-title').textContent = nextTrack.title;
             updateMediaSession(nextTrack);
@@ -290,22 +359,18 @@
             persistPlaybackState(true);
         } else {
             // Album finished
+            playRequested = false;
             isPlaying = false;
             setPlayIcon();
+            renderFrame();
             persistPlaybackState(true);
         }
     }
 
     function onMetadata() {
         if (this === activeDeck && activeDeck.duration) {
-            if (pendingSeekTime !== null) {
-                var bounded = clamp(pendingSeekTime, 0, Math.max(0, activeDeck.duration - 0.05));
-                activeDeck.currentTime = bounded;
-                pendingSeekTime = null;
-            }
-            timeTotal.textContent = formatTime(activeDeck.duration);
-            progress.max = activeDeck.duration;
-            progress.setAttribute('aria-valuemax', String(Math.floor(activeDeck.duration)));
+            applyPendingSeek();
+            renderFrame();
         }
     }
 
@@ -352,55 +417,65 @@
     }
 
     function applyVolume() {
-        var effective = isMuted ? 0 : currentVolume;
-        if (deckA) deckA.volume = effective;
-        if (deckB) deckB.volume = effective;
+        [deckA, deckB].forEach(function (deck) {
+            if (!deck) return;
+            deck.volume = currentVolume;
+            deck.muted = isMuted || currentVolume === 0;
+        });
     }
 
     function updateVolumeUI() {
         if (volumeSlider) {
             volumeSlider.value = String(currentVolume);
-            volumeSlider.setAttribute('aria-valuenow', String(Math.round(currentVolume * 100)));
         }
         if (btnMute) {
             var muted = isMuted || currentVolume === 0;
             btnMute.textContent = muted ? 'MUTE' : 'VOL';
             btnMute.setAttribute('aria-label', muted ? 'Unmute' : 'Mute');
-            btnMute.setAttribute('aria-pressed', muted ? 'true' : 'false');
         }
     }
 
-    function startRAF() {
-        function tick() {
-            if (activeDeck && !isSeeking) {
-                var t = activeDeck.currentTime || 0;
-                var d = activeDeck.duration || 0;
-                progress.value = t;
-                timeCurrent.textContent = formatTime(t);
-                progress.setAttribute('aria-valuenow', String(Math.floor(t)));
-                if (d > 0) {
-                    progress.max = d;
-                    timeTotal.textContent = formatTime(d);
-                }
-            }
+    // The frame loop runs only while playing; paused states render a single frame.
+    function startLoop() {
+        if (loopRunning) return;
+        loopRunning = true;
+        requestAnimationFrame(tick);
+    }
 
-            // Update oscilloscope
-            if (typeof AcetateOscilloscope !== 'undefined') {
-                AcetateOscilloscope.draw(isPlaying);
-            }
-
-            // Update lyrics (60fps precision)
-            if (typeof AcetateLyrics !== 'undefined' && activeDeck) {
-                AcetateLyrics.update(activeDeck.currentTime);
-            }
-
-            if (isPlaying) {
-                persistPlaybackState(false);
-            }
-
-            rafId = requestAnimationFrame(tick);
+    function tick() {
+        renderFrame();
+        if (isPlaying) {
+            persistPlaybackState(false);
+            requestAnimationFrame(tick);
+        } else {
+            loopRunning = false;
         }
-        rafId = requestAnimationFrame(tick);
+    }
+
+    function renderFrame() {
+        if (!activeDeck) return;
+        var t = activeDeck.currentTime || 0;
+        var d = activeDeck.duration || 0;
+
+        if (d !== shownDuration) {
+            shownDuration = d;
+            progress.max = d > 0 ? d : 100;
+            timeTotal.textContent = formatTime(d);
+            shownSecond = -1;
+        }
+        if (!isSeeking && Math.floor(t) !== shownSecond) {
+            shownSecond = Math.floor(t);
+            progress.value = t;
+            timeCurrent.textContent = formatTime(t);
+            progress.setAttribute('aria-valuetext', formatTime(t) + ' of ' + formatTime(d));
+        }
+
+        if (typeof AcetateOscilloscope !== 'undefined') {
+            AcetateOscilloscope.draw(isPlaying);
+        }
+        if (typeof AcetateLyrics !== 'undefined') {
+            AcetateLyrics.update(t);
+        }
     }
 
     function updateMediaSession(track) {
@@ -431,46 +506,11 @@
                 inactiveDeck.src = nextURL;
                 inactiveDeck.load();
             }
-
-            prefetchTrack(tracks[nextIdx].stem);
-            if (nextIdx + 1 < tracks.length) {
-                prefetchTrack(tracks[nextIdx + 1].stem);
-            }
             return;
         }
 
         inactiveDeck.removeAttribute('src');
         inactiveDeck.load();
-    }
-
-    function prefetchTrack(stem) {
-        if (!stem || prefetchedTracks[stem]) return;
-        if (navigator.connection && navigator.connection.saveData) return;
-
-        prefetchedTracks[stem] = true;
-        fetch(streamURL(stem), { credentials: 'same-origin' })
-            .then(function (resp) {
-                if (!resp || !resp.ok) throw new Error('prefetch failed');
-                return drainResponse(resp);
-            })
-            .catch(function () {
-                delete prefetchedTracks[stem];
-            });
-    }
-
-    function drainResponse(resp) {
-        if (!resp.body || !resp.body.getReader) {
-            return resp.blob().then(function () { });
-        }
-
-        var reader = resp.body.getReader();
-        function pump() {
-            return reader.read().then(function (chunk) {
-                if (chunk.done) return;
-                return pump();
-            });
-        }
-        return pump();
     }
 
     function seekTo(seconds, shouldRecord) {
@@ -482,17 +522,13 @@
         var to = clamp((typeof seconds === 'number' && isFinite(seconds)) ? seconds : from, 0, limit);
 
         activeDeck.currentTime = to;
-        progress.value = to;
-        timeCurrent.textContent = formatTime(to);
+        renderFrame();
 
-        if (shouldRecord && typeof AcetateAnalytics !== 'undefined' && Acetate.albumData) {
-            var track = Acetate.albumData.tracks[Acetate.currentTrackIndex];
-            if (track) {
-                AcetateAnalytics.record('seek', track.stem, to, JSON.stringify({ from: from, to: to }));
-            }
+        if (shouldRecord) {
+            recordTrackEvent('seek', { from: from, to: to });
         }
 
-        syncPlaybackURL(true, to);
+        syncPlaybackURL(false, to);
         persistPlaybackState(false);
     }
 
@@ -516,11 +552,7 @@
     }
 
     function restoreVolumeState(state) {
-        if (!state) {
-            currentVolume = volumeSlider ? (parseFloat(volumeSlider.value) || 1) : 1;
-            if (currentVolume > 0) lastNonZeroVolume = currentVolume;
-            return;
-        }
+        if (!state) return;
 
         if (typeof state.volume === 'number' && isFinite(state.volume)) {
             currentVolume = clamp(state.volume, 0, 1);
@@ -611,14 +643,12 @@
         state.is_muted = isMuted;
         state.updated_at = now;
 
-        if (Acetate.albumData && Acetate.albumData.tracks && Acetate.currentTrackIndex >= 0) {
-            var track = Acetate.albumData.tracks[Acetate.currentTrackIndex];
-            if (track) {
-                state.track_stem = track.stem;
-                state.time_seconds = activeDeck ? Math.max(0, activeDeck.currentTime || 0) : 0;
-                state.album_fingerprint = getAlbumFingerprint(Acetate.albumData);
-                syncPlaybackURL(force, state.time_seconds);
-            }
+        var track = Acetate.currentTrack();
+        if (track) {
+            state.track_stem = track.stem;
+            state.time_seconds = activeDeck ? Math.max(0, activeDeck.currentTime || 0) : 0;
+            state.album_fingerprint = Acetate.makeAlbumFingerprint(Acetate.albumData);
+            syncPlaybackURL(force, state.time_seconds);
         }
 
         try {
@@ -629,33 +659,37 @@
         }
     }
 
-    function getAlbumFingerprint(albumData) {
-        if (!albumData || !albumData.tracks) return '';
-        var stems = [];
-        for (var i = 0; i < albumData.tracks.length; i++) {
-            stems.push(albumData.tracks[i].stem);
-        }
-        return stems.join('|');
-    }
-
     function syncPlaybackURL(force, timeSeconds) {
-        if (!Acetate.albumData || !Acetate.albumData.tracks || Acetate.currentTrackIndex < 0) return;
+        var track = Acetate.currentTrack();
+        if (!track || !Acetate.currentAlbum) return;
         var now = Date.now();
-        if (!force && now - lastURLSyncAt < URL_SYNC_MIN_INTERVAL_MS) return;
-
-        var track = Acetate.albumData.tracks[Acetate.currentTrackIndex];
-        if (!track) return;
+        var wait = URL_SYNC_MIN_INTERVAL_MS - (now - lastURLSyncAt);
+        if (!force && wait > 0) {
+            // Trailing update so the URL converges after a burst of seeks.
+            if (!urlSyncTimer) {
+                urlSyncTimer = setTimeout(function () {
+                    urlSyncTimer = null;
+                    if (Acetate.state === 'player') syncPlaybackURL(true);
+                }, wait);
+            }
+            return;
+        }
 
         var url = new URL(window.location.href);
         var nextTime = Math.max(0, Math.floor((typeof timeSeconds === 'number' ? timeSeconds : (activeDeck ? activeDeck.currentTime : 0)) || 0));
 
+        url.searchParams.set('album', Acetate.currentAlbum.slug);
         url.searchParams.set('track', track.stem);
         url.searchParams.set('t', String(nextTime));
 
         var next = url.pathname + '?' + url.searchParams.toString() + url.hash;
         var current = window.location.pathname + window.location.search + window.location.hash;
         if (next !== current) {
-            history.replaceState(history.state || { screen: 'player' }, '', next);
+            try {
+                history.replaceState(history.state || { screen: 'player' }, '', next);
+            } catch (err) {
+                // Safari throws SecurityError past its replaceState rate limit.
+            }
         }
         lastURLSyncAt = now;
     }
@@ -668,7 +702,7 @@
     }
 
     function streamURL(stem) {
-        return Acetate.albumApiBase() + '/stream/' + encodePathSegment(stem);
+        return Acetate.albumApiBase() + '/stream/' + Acetate.encodePathSegment(stem);
     }
 
     function isDeckSource(deck, relativeURL) {
@@ -685,24 +719,14 @@
         return Math.min(max, Math.max(min, value));
     }
 
-    function encodePathSegment(value) {
-        return encodeURIComponent(value).replace(/[!'()*]/g, function (ch) {
-            return '%' + ch.charCodeAt(0).toString(16).toUpperCase();
-        });
-    }
-
     function setPlayIcon() {
         btnPlay.innerHTML = '<svg width="18" height="20" viewBox="0 0 18 20" fill="currentColor"><polygon points="2,0 18,10 2,20"/></svg>';
         btnPlay.setAttribute('aria-label', 'Play');
-        btnPlay.setAttribute('aria-pressed', 'false');
-        btnPlay.classList.remove('is-paused');
     }
 
     function setPauseIcon() {
         btnPlay.innerHTML = '<svg width="16" height="20" viewBox="0 0 16 20" fill="currentColor"><rect x="1" y="0" width="4.5" height="20"/><rect x="10.5" y="0" width="4.5" height="20"/></svg>';
         btnPlay.setAttribute('aria-label', 'Pause');
-        btnPlay.setAttribute('aria-pressed', 'true');
-        btnPlay.classList.add('is-paused');
     }
 
     document.addEventListener('DOMContentLoaded', init);

@@ -14,6 +14,8 @@
     var gainEMA = 1;
     var tapRetries = 0;
     var tapRetryTimer = null;
+    var accent = "#8a7a5a";
+    var lastIsPlaying = false;
     var TAP_RETRY_MS = 250;
     var TAP_MAX_RETRIES = 12;
 
@@ -28,8 +30,17 @@
         canvas = document.getElementById("oscilloscope");
         if (!canvas) return;
         ctx = canvas.getContext("2d");
+        accent =
+            getComputedStyle(document.documentElement)
+                .getPropertyValue("--accent")
+                .trim() || accent;
         resize();
-        window.addEventListener("resize", resize);
+        // The canvas also changes size when lyrics are toggled, not only on window resize.
+        if (typeof ResizeObserver === "function") {
+            new ResizeObserver(resize).observe(canvas);
+        } else {
+            window.addEventListener("resize", resize);
+        }
 
         // The AudioContext can be suspended when the tab/app is backgrounded
         // (and is only otherwise resumed on a user gesture). Resume it as soon
@@ -49,6 +60,8 @@
         ctx.scale(dpr, dpr);
         drawWidth = rect.width;
         drawHeight = rect.height;
+        // Resizing clears the bitmap; repaint so a paused scope is not left blank.
+        draw(lastIsPlaying);
     }
 
     function initAudio(deckA, deckB) {
@@ -184,16 +197,13 @@
 
     function draw(isPlaying) {
         if (!canvas || !ctx) return;
+        lastIsPlaying = isPlaying;
 
         var width = drawWidth || canvas.getBoundingClientRect().width;
         var height = drawHeight || canvas.getBoundingClientRect().height;
         var midY = height / 2;
 
         ctx.clearRect(0, 0, width, height);
-        var accent =
-            getComputedStyle(document.documentElement)
-                .getPropertyValue("--accent")
-                .trim() || "#8a7a5a";
 
         if (!isPlaying || !analyser || !dataArray) {
             // Flat line — held breath

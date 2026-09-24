@@ -1,13 +1,14 @@
 // Acetate — Service Worker
-const CACHE_NAME = "acetate-static-v19";
-const API_CACHE = "acetate-api-v17";
-const AUDIO_CACHE = "acetate-audio-v17";
+const CACHE_NAME = "acetate-static-v21";
+const API_CACHE = "acetate-api-v18";
+const AUDIO_CACHE = "acetate-audio-v19";
 const MAX_AUDIO_CACHE_ENTRIES = 24;
+// Resets whenever the browser stops this worker; the page re-posts AUTHENTICATED on every track load.
 let listenerAuthenticated = false;
+const audioFillsInFlight = new Set();
 
 const STATIC_ASSETS = [
     "/",
-    "/index.html",
     "/css/style.css",
     "/js/app.js",
     "/js/gate.js",
@@ -23,7 +24,13 @@ const STATIC_ASSETS = [
 // Install — cache static assets
 self.addEventListener("install", (event) => {
     event.waitUntil(
-        caches.open(CACHE_NAME).then((cache) => cache.addAll(STATIC_ASSETS)),
+        caches
+            .open(CACHE_NAME)
+            .then((cache) =>
+                cache.addAll(
+                    STATIC_ASSETS.map((u) => new Request(u, { cache: "reload" })),
+                ),
+            ),
     );
     self.skipWaiting();
 });
@@ -68,39 +75,41 @@ self.addEventListener("message", (event) => {
 
 // Fetch — strategy based on request type
 self.addEventListener("fetch", (event) => {
-    if (event.request.method !== "GET") {
-        event.respondWith(fetch(event.request));
-        return;
-    }
+    if (event.request.method !== "GET") return;
 
-    var path;
+    var url;
     try {
-        path = new URL(event.request.url).pathname;
+        url = new URL(event.request.url);
     } catch (err) {
         return; // malformed URL — let the browser handle it
     }
+    var path = url.pathname;
 
-    // MP3 streaming — network first, cache fallback (supports ranged offline reads).
-    // Route shape: /api/albums/{slug}/stream/{stem}
+    // Every query variant of the SPA shell (/?album=&track=&t=) shares one cache entry.
+    if (path === "/" || path === "/index.html") {
+        event.respondWith(handleStaticAsset(event.request, "/"));
+        return;
+    }
+
+    // Audio: cache first when a full copy exists, otherwise network plus one background fill.
+    // Route shape: /api/albums/{slug}/stream/{stem}; downloads (?dl=1) bypass the worker.
     if (isAlbumStreamPath(path)) {
-        event.respondWith(handleAudioRequest(event.request));
+        if (!listenerAuthenticated || url.searchParams.has("dl")) return;
+        handleAudioRequest(event);
         return;
     }
 
     // Authenticated API content useful offline (album-scoped routes).
     if (isOfflineAPIPath(path)) {
+        if (!listenerAuthenticated) return;
         event.respondWith(handleOfflineAPIRequest(event.request));
         return;
     }
 
     // Static assets — stale while revalidate.
     if (isStaticAsset(path)) {
-        event.respondWith(handleStaticAsset(event.request));
-        return;
+        event.respondWith(handleStaticAsset(event.request, event.request));
     }
-
-    // Default — network only.
-    event.respondWith(fetch(event.request));
 });
 
 // Album-scoped content routes: /api/albums/{slug}/…
@@ -139,13 +148,13 @@ function isStaticAsset(path) {
     );
 }
 
-function handleStaticAsset(request) {
+function handleStaticAsset(request, cacheKey) {
     return caches.open(CACHE_NAME).then((cache) =>
-        cache.match(request).then((cached) => {
-            var network = fetch(request)
+        cache.match(cacheKey).then((cached) => {
+            var network = fetch(request, { cache: "no-cache" })
                 .then((response) => {
                     if (response && response.ok) {
-                        cache.put(request, response.clone());
+                        cache.put(cacheKey, response.clone());
                     }
                     return response;
                 })
@@ -164,10 +173,6 @@ function handleStaticAsset(request) {
 }
 
 function handleOfflineAPIRequest(request) {
-    if (!listenerAuthenticated) {
-        return fetch(request);
-    }
-
     return caches.open(API_CACHE).then((cache) =>
         fetch(request)
             .then((response) => {
@@ -191,50 +196,55 @@ function handleOfflineAPIRequest(request) {
     );
 }
 
-function handleAudioRequest(request) {
-    var rangeHeader = request.headers.get("Range");
+// Network first: Chrome's media pipeline fails when one element's range
+// requests switch from network responses to worker-built ones, so the cached
+// copy is only an offline fallback.
+function handleAudioRequest(event) {
+    var request = event.request;
     var cacheKey = request.url;
 
-    if (!listenerAuthenticated) {
-        return fetch(request);
-    }
-
-    if (rangeHeader) {
-        return fetch(request).catch(() =>
-            readRangeFromCachedAudio(cacheKey, rangeHeader).then(
-                (resp) =>
-                    resp ||
-                    new Response("", { status: 503, statusText: "Offline" }),
-            ),
-        );
-    }
-
-    return caches.open(AUDIO_CACHE).then((cache) =>
-        fetch(request)
-            .then((response) => {
-                if (response && response.ok && response.status === 200) {
-                    cache.put(cacheKey, response.clone());
-                    trimAudioCache(cache);
-                }
-                return response;
-            })
-            .catch(() =>
-                cache
-                    .match(cacheKey)
-                    .then(
-                        (cached) =>
-                            cached ||
-                            new Response("", {
-                                status: 503,
-                                statusText: "Offline",
-                            }),
-                    ),
-            ),
+    event.respondWith(
+        fetch(request).catch(() =>
+            caches
+                .open(AUDIO_CACHE)
+                .then((cache) => cache.match(cacheKey))
+                .then((full) =>
+                    full
+                        ? serveCachedAudio(full, request.headers.get("Range"))
+                        : new Response("", { status: 503, statusText: "Offline" }),
+                ),
+        ),
+    );
+    event.waitUntil(
+        caches
+            .open(AUDIO_CACHE)
+            .then((cache) => cache.match(cacheKey))
+            .then((full) => (full ? null : fillAudioCache(cacheKey)))
+            .catch(() => {}),
     );
 }
 
+// <audio> only issues Range requests, which are never cacheable; one full GET per track fills the cache.
+function fillAudioCache(cacheKey) {
+    if (audioFillsInFlight.has(cacheKey)) return null;
+    audioFillsInFlight.add(cacheKey);
+    return fetch(cacheKey, { credentials: "same-origin" })
+        .then((response) => {
+            if (!response || response.status !== 200) return null;
+            return caches
+                .open(AUDIO_CACHE)
+                .then((cache) =>
+                    cache.put(cacheKey, response).then(() => trimAudioCache(cache)),
+                );
+        })
+        .catch(() => {})
+        .then(() => {
+            audioFillsInFlight.delete(cacheKey);
+        });
+}
+
 function trimAudioCache(cache) {
-    cache.keys().then((keys) => {
+    return cache.keys().then((keys) => {
         if (keys.length <= MAX_AUDIO_CACHE_ENTRIES) return;
         var deletions = [];
         for (var i = 0; i < keys.length - MAX_AUDIO_CACHE_ENTRIES; i++) {
@@ -244,39 +254,36 @@ function trimAudioCache(cache) {
     });
 }
 
-function readRangeFromCachedAudio(cacheKey, rangeHeader) {
-    return caches.open(AUDIO_CACHE).then((cache) =>
-        cache.match(cacheKey).then((cachedResponse) => {
-            if (!cachedResponse) return null;
+function serveCachedAudio(cachedResponse, rangeHeader) {
+    if (!rangeHeader) return cachedResponse;
 
-            return cachedResponse.arrayBuffer().then((buffer) => {
-                var total = buffer.byteLength;
-                var range = parseRangeHeader(rangeHeader, total);
-                if (!range) return null;
-
-                var chunk = buffer.slice(range.start, range.end + 1);
-                var headers = new Headers(cachedResponse.headers);
-                headers.set(
-                    "Content-Range",
-                    "bytes " + range.start + "-" + range.end + "/" + total,
-                );
-                headers.set("Accept-Ranges", "bytes");
-                headers.set(
-                    "Content-Length",
-                    String(range.end - range.start + 1),
-                );
-                if (!headers.get("Content-Type")) {
-                    headers.set("Content-Type", "audio/mpeg");
-                }
-
-                return new Response(chunk, {
-                    status: 206,
-                    statusText: "Partial Content",
-                    headers: headers,
-                });
+    return cachedResponse.blob().then((blob) => {
+        var total = blob.size;
+        var range = parseRangeHeader(rangeHeader, total);
+        if (!range) {
+            return new Response("", {
+                status: 416,
+                headers: { "Content-Range": "bytes */" + total },
             });
-        }),
-    );
+        }
+
+        var headers = new Headers(cachedResponse.headers);
+        headers.set(
+            "Content-Range",
+            "bytes " + range.start + "-" + range.end + "/" + total,
+        );
+        headers.set("Accept-Ranges", "bytes");
+        headers.set("Content-Length", String(range.end - range.start + 1));
+        if (!headers.get("Content-Type")) {
+            headers.set("Content-Type", "audio/mpeg");
+        }
+
+        return new Response(blob.slice(range.start, range.end + 1), {
+            status: 206,
+            statusText: "Partial Content",
+            headers: headers,
+        });
+    });
 }
 
 function parseRangeHeader(rangeHeader, totalSize) {

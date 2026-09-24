@@ -18,7 +18,7 @@
 
                 var coverImg = document.createElement('img');
                 coverImg.className = 'album-card-cover';
-                coverImg.alt = album.title;
+                coverImg.alt = '';
                 coverImg.src = '/api/albums/' + Acetate.encodePathSegment(album.slug) + '/cover';
                 coverImg.onerror = function () {
                     this.onerror = null;

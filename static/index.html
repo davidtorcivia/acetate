@@ -44,8 +44,13 @@
                                         autocomplete="off"
                                         spellcheck="false"
                                         aria-label="Passphrase"
-                                        autofocus
+                                        disabled
                                 />
+                                <p
+                                        id="gate-status"
+                                        class="gate-status"
+                                        role="status"
+                                ></p>
                         </div>
                 </div>
 
@@ -66,7 +71,7 @@
                                         alt="Album cover"
                                         draggable="false"
                                 />
-                                <canvas id="oscilloscope"></canvas>
+                                <canvas id="oscilloscope" aria-hidden="true"></canvas>
                                 <div
                                         id="track-title"
                                         class="track-title"
@@ -75,6 +80,7 @@
                                 <div
                                         id="lyrics-container"
                                         class="lyrics-container"
+                                        role="region"
                                         aria-label="Lyrics"
                                         tabindex="0"
                                 >
@@ -150,7 +156,7 @@
                                                         class="progress"
                                                         min="0"
                                                         max="100"
-                                                        step="0.1"
+                                                        step="1"
                                                         value="0"
                                                         aria-label="Playback position"
                                                 />
@@ -162,6 +168,11 @@
                                                                 >0:00</span
                                                         >
                                                 </div>
+                                                <p
+                                                        id="player-status"
+                                                        class="player-status"
+                                                        role="status"
+                                                ></p>
                                         </div>
                                         <div class="volume-container">
                                                 <button
@@ -198,6 +209,7 @@
                                 <div
                                         id="tracklist"
                                         class="tracklist collapsed"
+                                        role="region"
                                         aria-label="Track list"
                                 >
                                         <ol id="tracklist-items"></ol>
