@@ -2,6 +2,7 @@ package analytics
 
 import (
 	"database/sql"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -132,88 +133,78 @@ func GetDropoutHeatmapFiltered(db *sql.DB, stem string, filter QueryFilter) ([]D
 	appendTimeFilter(&where, &args, "created_at", filter)
 	appendAlbumFilter(&where, &args, "album_id", filter.AlbumID)
 
-	query := `
-		SELECT position_seconds
+	rows, err := db.Query(`
+		SELECT position_seconds, COALESCE(json_extract(metadata, '$.duration'), 0)
 		FROM events
-		WHERE ` + strings.Join(where, " AND ")
-
-	rows, err := db.Query(query, args...)
+		WHERE `+strings.Join(where, " AND "), args...)
 	if err != nil {
 		return nil, fmt.Errorf("query dropout positions: %w", err)
 	}
 	defer rows.Close()
 
-	var positions []float64
-	var maxPos float64
+	type point struct{ pos, duration float64 }
+	var points []point
+	var maxPos, maxDuration float64
 	for rows.Next() {
-		var pos float64
-		if err := rows.Scan(&pos); err != nil {
-			continue
+		var p point
+		if err := rows.Scan(&p.pos, &p.duration); err != nil {
+			return nil, fmt.Errorf("scan dropout position: %w", err)
 		}
-		positions = append(positions, pos)
-		if pos > maxPos {
-			maxPos = pos
-		}
+		points = append(points, p)
+		maxPos = max(maxPos, p.pos)
+		maxDuration = max(maxDuration, p.duration)
 	}
 	if err := rows.Err(); err != nil {
 		return nil, err
 	}
 
-	if maxPos > 0 {
-		for _, pos := range positions {
-			normalized := pos / maxPos
-			binIdx := int(normalized * 10)
-			if binIdx >= 10 {
-				binIdx = 9
-			}
-			bins[binIdx].Count++
+	// Events from clients that predate the duration field fall back to the
+	// longest known duration, or to the furthest position seen.
+	fallback := maxDuration
+	if fallback <= 0 {
+		fallback = maxPos
+	}
+	for _, p := range points {
+		d := p.duration
+		if d <= 0 {
+			d = fallback
 		}
+		// Compare as a float first: a huge ratio overflows the int conversion.
+		frac := p.pos / d
+		binIdx := 9
+		if frac < 1 {
+			binIdx = int(frac * 10)
+		}
+		bins[binIdx].Count++
 	}
 
 	return bins, nil
 }
 
-// GetSessionTimelineFiltered returns recent sessions with optional filters.
+// GetSessionTimelineFiltered returns the most recent listening sessions, built
+// from events so that sessions outlive the 7-day sessions table rows.
 func GetSessionTimelineFiltered(db *sql.DB, limit int, filter QueryFilter) ([]SessionInfo, error) {
 	filter = normalizeFilter(filter)
-
 	if limit <= 0 {
 		limit = 50
 	}
 
-	joinClauses := []string{"s.id = e.session_id"}
-	joinArgs := make([]interface{}, 0, 8)
-	appendTimeFilter(&joinClauses, &joinArgs, "e.created_at", filter)
-	appendStemFilter(&joinClauses, &joinArgs, "e.track_stem", filter.Stems)
-	appendAlbumFilter(&joinClauses, &joinArgs, "e.album_id", filter.AlbumID)
-
-	where := []string{"1=1"}
-	args := make([]interface{}, 0, 8)
-	appendTimeFilter(&where, &args, "s.started_at", filter)
-	if filter.AlbumID != nil {
-		where = append(where, "s.id IN (SELECT DISTINCT session_id FROM events WHERE album_id = ?)")
-		args = append(args, *filter.AlbumID)
-	}
-
-	queryArgs := make([]interface{}, 0, len(joinArgs)+len(args)+1)
-	queryArgs = append(queryArgs, joinArgs...)
-	queryArgs = append(queryArgs, args...)
-	queryArgs = append(queryArgs, limit)
-
+	where, args := eventFilter(filter)
+	args = append(args, limit)
 	rows, err := db.Query(`
 		SELECT
-			s.id,
-			s.started_at,
-			s.last_seen_at,
-			s.ip_hash,
-			COUNT(DISTINCT CASE WHEN e.event_type = 'play' THEN e.track_stem END) as tracks_heard
-		FROM sessions s
-		LEFT JOIN events e ON `+strings.Join(joinClauses, " AND ")+`
-		WHERE `+strings.Join(where, " AND ")+`
-		GROUP BY s.id
-		ORDER BY s.started_at DESC
+			e.session_id,
+			MIN(e.created_at),
+			MAX(e.created_at),
+			COALESCE(MAX(s.ip_hash), ''),
+			COUNT(DISTINCT CASE WHEN e.event_type = 'play' THEN e.track_stem END)
+		FROM events e
+		LEFT JOIN sessions s ON s.id = e.session_id
+		WHERE `+where+`
+		GROUP BY e.session_id
+		ORDER BY MIN(e.created_at) DESC
 		LIMIT ?
-	`, queryArgs...)
+	`, args...)
 	if err != nil {
 		return nil, fmt.Errorf("query session timeline: %w", err)
 	}
@@ -222,86 +213,79 @@ func GetSessionTimelineFiltered(db *sql.DB, limit int, filter QueryFilter) ([]Se
 	var sessions []SessionInfo
 	for rows.Next() {
 		var s SessionInfo
-		var ipHash sql.NullString
-		if err := rows.Scan(&s.SessionID, &s.StartedAt, &s.LastSeenAt, &ipHash, &s.TracksHeard); err != nil {
+		if err := rows.Scan(&s.SessionID, &s.StartedAt, &s.LastSeenAt, &s.IPHash, &s.TracksHeard); err != nil {
 			return nil, fmt.Errorf("scan session: %w", err)
 		}
-		if ipHash.Valid {
-			if len(ipHash.String) > 12 {
-				s.IPHash = ipHash.String[:12] + "..."
-			} else {
-				s.IPHash = ipHash.String
-			}
+		s.StartedAt = sqliteTimeToRFC3339(s.StartedAt)
+		s.LastSeenAt = sqliteTimeToRFC3339(s.LastSeenAt)
+		if len(s.IPHash) > 12 {
+			s.IPHash = s.IPHash[:12] + "..."
+		}
+		if len(s.SessionID) > 12 {
+			s.SessionID = s.SessionID[:12]
 		}
 		sessions = append(sessions, s)
 	}
 	return sessions, rows.Err()
 }
 
+// eventFilter builds a WHERE clause over events aliased "e".
+func eventFilter(filter QueryFilter) (string, []interface{}) {
+	where := []string{"1=1"}
+	args := make([]interface{}, 0, 8)
+	appendTimeFilter(&where, &args, "e.created_at", filter)
+	appendStemFilter(&where, &args, "e.track_stem", filter.Stems)
+	appendEventTypeFilter(&where, &args, "e.event_type", filter.EventTypes)
+	appendAlbumFilter(&where, &args, "e.album_id", filter.AlbumID)
+	return strings.Join(where, " AND "), args
+}
+
+func sqliteTimeToRFC3339(v string) string {
+	t, err := time.ParseInLocation(sqliteTimeLayout, v, time.UTC)
+	if err != nil {
+		return v
+	}
+	return t.Format(time.RFC3339)
+}
+
 // GetOverallStatsFiltered returns aggregate analytics with optional filtering.
 func GetOverallStatsFiltered(db *sql.DB, filter QueryFilter) (*OverallStats, error) {
 	filter = normalizeFilter(filter)
 	stats := &OverallStats{}
+	where, args := eventFilter(filter)
 
-	// Total sessions (session start time-based filter, scoped to album if set).
-	whereSessions := []string{"1=1"}
-	argsSessions := make([]interface{}, 0, 4)
-	appendTimeFilter(&whereSessions, &argsSessions, "started_at", filter)
-	if filter.AlbumID != nil {
-		whereSessions = append(whereSessions, "id IN (SELECT DISTINCT session_id FROM events WHERE album_id = ?)")
-		argsSessions = append(argsSessions, *filter.AlbumID)
-	}
-	if err := db.QueryRow("SELECT COUNT(*) FROM sessions WHERE "+strings.Join(whereSessions, " AND "), argsSessions...).Scan(&stats.TotalSessions); err != nil {
-		return nil, fmt.Errorf("query total sessions: %w", err)
-	}
-
-	// Build event filter once for aggregate event queries.
-	eventWhere := []string{"1=1"}
-	eventArgs := make([]interface{}, 0, 8)
-	appendTimeFilter(&eventWhere, &eventArgs, "created_at", filter)
-	appendStemFilter(&eventWhere, &eventArgs, "track_stem", filter.Stems)
-	appendEventTypeFilter(&eventWhere, &eventArgs, "event_type", filter.EventTypes)
-	appendAlbumFilter(&eventWhere, &eventArgs, "album_id", filter.AlbumID)
-
-	// Average tracks per session.
-	avgQuery := `
-		SELECT COALESCE(AVG(track_count), 0) FROM (
-			SELECT COUNT(DISTINCT CASE WHEN event_type = 'play' THEN track_stem END) as track_count
-			FROM events
-			WHERE ` + strings.Join(eventWhere, " AND ") + `
-			GROUP BY session_id
-		)
-	`
-	if err := db.QueryRow(avgQuery, eventArgs...).Scan(&stats.AvgTracksPerSess); err != nil {
-		return nil, fmt.Errorf("query avg tracks/session: %w", err)
+	if err := db.QueryRow(`
+		SELECT COUNT(*), COALESCE(AVG(track_count), 0) FROM (
+			SELECT COUNT(DISTINCT CASE WHEN e.event_type = 'play' THEN e.track_stem END) AS track_count
+			FROM events e
+			WHERE `+where+`
+			GROUP BY e.session_id
+		)`, args...).Scan(&stats.TotalSessions, &stats.AvgTracksPerSess); err != nil {
+		return nil, fmt.Errorf("query session totals: %w", err)
 	}
 
-	// Most completed track.
-	mostWhere := cloneStrings(eventWhere)
-	mostArgs := cloneInterfaces(eventArgs)
-	mostWhere = append(mostWhere, "event_type = 'complete'", "track_stem IS NOT NULL", "track_stem != ''")
-	_ = db.QueryRow(`
-		SELECT track_stem FROM events
-		WHERE `+strings.Join(mostWhere, " AND ")+`
-		GROUP BY track_stem
+	err := db.QueryRow(`
+		SELECT e.track_stem FROM events e
+		WHERE `+where+` AND e.event_type = 'complete' AND COALESCE(e.track_stem, '') != ''
+		GROUP BY e.track_stem
 		ORDER BY COUNT(*) DESC LIMIT 1
-	`, mostArgs...).Scan(&stats.MostCompleted)
+	`, args...).Scan(&stats.MostCompleted)
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return nil, fmt.Errorf("query most completed: %w", err)
+	}
 
-	// Least completed track (among those that have been played).
-	leastWhere := cloneStrings(eventWhere)
-	leastArgs := cloneInterfaces(eventArgs)
-	leastWhere = append(leastWhere, "track_stem IS NOT NULL", "track_stem != ''")
-	_ = db.QueryRow(`
-		SELECT track_stem FROM (
-			SELECT track_stem,
-				CAST(SUM(CASE WHEN event_type = 'complete' THEN 1 ELSE 0 END) AS REAL) /
-				NULLIF(SUM(CASE WHEN event_type = 'play' THEN 1 ELSE 0 END), 0) as rate
-			FROM events
-			WHERE `+strings.Join(leastWhere, " AND ")+`
-			GROUP BY track_stem
-			HAVING SUM(CASE WHEN event_type = 'play' THEN 1 ELSE 0 END) > 0
-		) ORDER BY rate ASC LIMIT 1
-	`, leastArgs...).Scan(&stats.LeastCompleted)
+	// Least completed among tracks that have been played.
+	err = db.QueryRow(`
+		SELECT e.track_stem FROM events e
+		WHERE `+where+` AND COALESCE(e.track_stem, '') != ''
+		GROUP BY e.track_stem
+		HAVING SUM(e.event_type = 'play') > 0
+		ORDER BY CAST(SUM(e.event_type = 'complete') AS REAL) / SUM(e.event_type = 'play') ASC
+		LIMIT 1
+	`, args...).Scan(&stats.LeastCompleted)
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return nil, fmt.Errorf("query least completed: %w", err)
+	}
 
 	return stats, nil
 }
@@ -317,12 +301,10 @@ func normalizeFilter(filter QueryFilter) QueryFilter {
 		out.To = &to
 	}
 
+	// Stems are bound as parameters, so an unknown one simply matches nothing;
+	// dropping it would silently widen the filter to every track.
 	stemSeen := make(map[string]struct{}, len(filter.Stems))
 	for _, stem := range filter.Stems {
-		stem = strings.TrimSpace(stem)
-		if !validTrackStem(stem) {
-			continue
-		}
 		if _, ok := stemSeen[stem]; ok {
 			continue
 		}
@@ -392,16 +374,4 @@ func placeholders(n int) string {
 		return ""
 	}
 	return strings.TrimRight(strings.Repeat("?,", n), ",")
-}
-
-func cloneStrings(in []string) []string {
-	out := make([]string, len(in))
-	copy(out, in)
-	return out
-}
-
-func cloneInterfaces(in []interface{}) []interface{} {
-	out := make([]interface{}, len(in))
-	copy(out, in)
-	return out
 }

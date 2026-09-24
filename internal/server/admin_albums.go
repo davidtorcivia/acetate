@@ -1,17 +1,68 @@
 package server
 
 import (
+	"errors"
+	"fmt"
 	"log"
 	"net/http"
 	"os"
 	"path/filepath"
-	"strconv"
 	"strings"
 
-	"acetate/internal/config"
-
-	"github.com/go-chi/chi/v5"
+	"acetate/internal/album"
+	"acetate/internal/albums"
 )
+
+// maxPassphraseLen is bcrypt's input limit; longer passphrases fail to hash.
+const maxPassphraseLen = 72
+
+// checkAlbumIDs answers 400 and returns false when ids names a missing album.
+func (s *Server) checkAlbumIDs(w http.ResponseWriter, ids []int64) bool {
+	unknown, err := s.albumStore.UnknownAlbumIDs(ids)
+	if err != nil {
+		log.Printf("check album ids error: %v", err)
+		jsonError(w, "internal error", http.StatusInternalServerError)
+		return false
+	}
+	if len(unknown) > 0 {
+		jsonError(w, fmt.Sprintf("unknown album id %d", unknown[0]), http.StatusBadRequest)
+		return false
+	}
+	return true
+}
+
+func validatePassphrase(p string) error {
+	if p == "" {
+		return errors.New("passphrase is required")
+	}
+	if len(p) > maxPassphraseLen {
+		return fmt.Errorf("passphrase must be at most %d bytes", maxPassphraseLen)
+	}
+	return nil
+}
+
+// resolveAlbumPath resolves a folder name (or path) against ALBUM_PATH and
+// refuses anything outside it. Without a base path any directory is allowed.
+func (s *Server) resolveAlbumPath(p string) (string, error) {
+	if s.albumBasePath != "" {
+		base, err := filepath.Abs(s.albumBasePath)
+		if err != nil {
+			return "", err
+		}
+		if !filepath.IsAbs(p) {
+			p = filepath.Join(base, p)
+		}
+		rel, err := filepath.Rel(base, filepath.Clean(p))
+		if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+			return "", errors.New("album_path must be inside the album directory")
+		}
+	}
+	p = filepath.Clean(p)
+	if info, err := os.Stat(p); err != nil || !info.IsDir() {
+		return "", errors.New("album_path is not a readable directory")
+	}
+	return p, nil
+}
 
 // --- Album CRUD ---
 
@@ -79,16 +130,11 @@ func (s *Server) handleAdminCreateAlbum(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	// Resolve relative folder names against the album base path.
-	if s.albumBasePath != "" && !filepath.IsAbs(albumPath) {
-		albumPath = filepath.Join(s.albumBasePath, albumPath)
-	}
-	cleaned := filepath.Clean(albumPath)
-	if info, err := os.Stat(cleaned); err != nil || !info.IsDir() {
-		jsonError(w, "album_path is not a readable directory", http.StatusBadRequest)
+	albumPath, err := s.resolveAlbumPath(albumPath)
+	if err != nil {
+		jsonError(w, err.Error(), http.StatusBadRequest)
 		return
 	}
-	albumPath = cleaned
 
 	alb, err := s.albumStore.CreateAlbum(title, artist, albumPath)
 	if err != nil {
@@ -99,9 +145,9 @@ func (s *Server) handleAdminCreateAlbum(w http.ResponseWriter, r *http.Request) 
 
 	// Import the tracks sitting in the folder. Best effort: a bad scan leaves the
 	// album empty and the admin can still use "Import Tracks from Disk".
-	if diskTracks, err := config.ScanAlbumTracks(alb.AlbumPath); err != nil {
+	if diskTracks, err := album.ScanTracks(alb.AlbumPath); err != nil {
 		log.Printf("scan tracks for album %d: %v", alb.ID, err)
-	} else if err := s.albumStore.SetTracks(alb.ID, configTracksToAlbumTracks(diskTracks)); err != nil {
+	} else if err := s.albumStore.SetTracks(alb.ID, diskTracks); err != nil {
 		log.Printf("set tracks for album %d: %v", alb.ID, err)
 	}
 
@@ -123,28 +169,26 @@ func (s *Server) handleAdminUpdateAlbum(w http.ResponseWriter, r *http.Request) 
 	}
 
 	var req struct {
-		Title            string `json:"title"`
-		Artist           string `json:"artist"`
-		DownloadsEnabled *bool  `json:"downloads_enabled"`
+		Title            *string `json:"title"`
+		Artist           *string `json:"artist"`
+		DownloadsEnabled *bool   `json:"downloads_enabled"`
 	}
 	if err := decodeJSONBody(r, &req); err != nil {
 		jsonError(w, "bad request", http.StatusBadRequest)
 		return
 	}
 
-	title := alb.Title
-	artist := alb.Artist
-	if req.Title != "" {
-		title = trimAndCollapseSpaces(req.Title)
-	}
-	if req.Artist != "" {
-		artist = trimAndCollapseSpaces(req.Artist)
-	}
-
-	if err := s.albumStore.UpdateAlbum(alb.ID, title, artist); err != nil {
-		log.Printf("update album error: %v", err)
-		jsonError(w, "internal error", http.StatusInternalServerError)
+	title, artist, ok := applyAlbumMetadata(alb, req.Title, req.Artist)
+	if !ok {
+		jsonError(w, "bad request: title and artist must be at most 256 characters", http.StatusBadRequest)
 		return
+	}
+	if title != alb.Title || artist != alb.Artist {
+		if err := s.albumStore.UpdateAlbum(alb.ID, title, artist); err != nil {
+			log.Printf("update album error: %v", err)
+			jsonError(w, "internal error", http.StatusInternalServerError)
+			return
+		}
 	}
 
 	if req.DownloadsEnabled != nil {
@@ -168,6 +212,9 @@ func (s *Server) handleAdminDeleteAlbum(w http.ResponseWriter, r *http.Request) 
 		log.Printf("delete album error: %v", err)
 		jsonError(w, "internal error", http.StatusInternalServerError)
 		return
+	}
+	if err := os.RemoveAll(s.coverDir(alb.ID)); err != nil {
+		log.Printf("remove cover for album %d: %v", alb.ID, err)
 	}
 
 	jsonOK(w, map[string]string{"status": "ok"})
@@ -221,14 +268,17 @@ func (s *Server) handleAdminCreatePassword(w http.ResponseWriter, r *http.Reques
 	}
 
 	passphrase := strings.TrimSpace(req.Passphrase)
-	if passphrase == "" {
-		jsonError(w, "passphrase is required", http.StatusBadRequest)
+	if err := validatePassphrase(passphrase); err != nil {
+		jsonError(w, err.Error(), http.StatusBadRequest)
 		return
 	}
 
 	label := strings.TrimSpace(req.Label)
 	if label == "" {
 		label = "Password"
+	}
+	if !s.checkAlbumIDs(w, req.AlbumIDs) {
+		return
 	}
 
 	pw, err := s.albumStore.CreatePassword(label, passphrase, req.AlbumIDs)
@@ -242,10 +292,8 @@ func (s *Server) handleAdminCreatePassword(w http.ResponseWriter, r *http.Reques
 }
 
 func (s *Server) handleAdminUpdatePassword(w http.ResponseWriter, r *http.Request) {
-	idStr := chi.URLParam(r, "id")
-	id, err := strconv.ParseInt(idStr, 10, 64)
-	if err != nil || id <= 0 {
-		jsonError(w, "bad request", http.StatusBadRequest)
+	id, ok := urlID(w, r)
+	if !ok {
 		return
 	}
 
@@ -263,14 +311,21 @@ func (s *Server) handleAdminUpdatePassword(w http.ResponseWriter, r *http.Reques
 	var passphrase *string
 	if req.Passphrase != nil {
 		p := strings.TrimSpace(*req.Passphrase)
-		if p == "" {
-			jsonError(w, "passphrase cannot be empty", http.StatusBadRequest)
+		if err := validatePassphrase(p); err != nil {
+			jsonError(w, err.Error(), http.StatusBadRequest)
 			return
 		}
 		passphrase = &p
 	}
 
+	if !s.checkAlbumIDs(w, req.AlbumIDs) {
+		return
+	}
 	if err := s.albumStore.UpdatePassword(id, label, passphrase, req.AlbumIDs); err != nil {
+		if errors.Is(err, albums.ErrNotFound) {
+			jsonError(w, "not found", http.StatusNotFound)
+			return
+		}
 		log.Printf("update password error: %v", err)
 		jsonError(w, "internal error", http.StatusInternalServerError)
 		return
@@ -280,10 +335,8 @@ func (s *Server) handleAdminUpdatePassword(w http.ResponseWriter, r *http.Reques
 }
 
 func (s *Server) handleAdminDeletePassword(w http.ResponseWriter, r *http.Request) {
-	idStr := chi.URLParam(r, "id")
-	id, err := strconv.ParseInt(idStr, 10, 64)
-	if err != nil || id <= 0 {
-		jsonError(w, "bad request", http.StatusBadRequest)
+	id, ok := urlID(w, r)
+	if !ok {
 		return
 	}
 

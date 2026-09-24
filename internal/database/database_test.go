@@ -20,7 +20,7 @@ func TestOpenAndMigrate(t *testing.T) {
 	}
 
 	// Verify tables exist
-	tables := []string{"sessions", "admin_sessions", "admin_users", "events", "analytics_rollups_daily", "admin_auth_audit"}
+	tables := []string{"sessions", "admin_sessions", "admin_users", "events", "admin_auth_audit"}
 	for _, table := range tables {
 		var name string
 		err := db.QueryRow("SELECT name FROM sqlite_master WHERE type='table' AND name=?", table).Scan(&name)
@@ -59,4 +59,32 @@ func TestMigrateIdempotent(t *testing.T) {
 		t.Fatalf("second Open: %v", err)
 	}
 	db.Close()
+}
+
+func TestForeignKeysCascade(t *testing.T) {
+	db, err := Open(t.TempDir())
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer db.Close()
+
+	res, err := db.Exec("INSERT INTO albums (slug, title, album_path) VALUES ('a', 'A', '/x')")
+	if err != nil {
+		t.Fatalf("insert album: %v", err)
+	}
+	albumID, _ := res.LastInsertId()
+	if _, err := db.Exec("INSERT INTO album_tracks (album_id, stem, title) VALUES (?, 's', 'S')", albumID); err != nil {
+		t.Fatalf("insert track: %v", err)
+	}
+	if _, err := db.Exec("DELETE FROM albums WHERE id = ?", albumID); err != nil {
+		t.Fatalf("delete album: %v", err)
+	}
+
+	var n int
+	if err := db.QueryRow("SELECT COUNT(*) FROM album_tracks").Scan(&n); err != nil {
+		t.Fatal(err)
+	}
+	if n != 0 {
+		t.Fatalf("album_tracks rows after album delete = %d, want 0", n)
+	}
 }

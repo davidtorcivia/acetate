@@ -8,10 +8,12 @@ import (
 	"io"
 	"log"
 	"net/http"
-	"net/url"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/go-chi/chi/v5"
 
 	"acetate/internal/albums"
 	"acetate/internal/analytics"
@@ -26,7 +28,7 @@ type Server struct {
 	sessions               *auth.SessionStore
 	rateLimiter            *auth.RateLimiter
 	adminLoginGuard        *adminLoginGuard
-	cfIPs                  *auth.CloudflareIPs
+	clientIPs              *auth.ClientIPResolver
 	collector              *analytics.Collector
 	dataPath               string
 	albumBasePath          string
@@ -47,14 +49,17 @@ type Config struct {
 	MaintenanceInterval    time.Duration
 	DB                     *sql.DB
 	AlbumStore             *albums.Store
+	ClientIPs              *auth.ClientIPResolver // nil trusts no proxy
 }
 
 // New creates a new Server with all dependencies wired.
 func New(cfg Config) *Server {
 	sessions := auth.NewSessionStore(cfg.DB)
 	rateLimiter := auth.NewRateLimiter()
-	cfIPs := auth.NewCloudflareIPs()
 	collector := analytics.NewCollector(cfg.DB)
+	if cfg.ClientIPs == nil {
+		cfg.ClientIPs = &auth.ClientIPResolver{}
+	}
 
 	s := &Server{
 		db:                     cfg.DB,
@@ -62,7 +67,7 @@ func New(cfg Config) *Server {
 		sessions:               sessions,
 		rateLimiter:            rateLimiter,
 		adminLoginGuard:        newAdminLoginGuard(),
-		cfIPs:                  cfIPs,
+		clientIPs:              cfg.ClientIPs,
 		collector:              collector,
 		dataPath:               cfg.DataPath,
 		albumBasePath:          cfg.AlbumBasePath,
@@ -113,7 +118,6 @@ func (s *Server) Shutdown(ctx context.Context) {
 	log.Println("stopping background tasks...")
 	s.sessions.Close()
 	s.rateLimiter.Close()
-	s.cfIPs.Close()
 }
 
 func (s *Server) startMaintenanceLoop() {
@@ -131,9 +135,9 @@ func (s *Server) startMaintenanceLoop() {
 				log.Printf("analytics maintenance error: %v", err)
 				return
 			}
-			if res.RolledDays > 0 || res.PrunedRows > 0 {
-				log.Printf("analytics maintenance: rolled_days=%d rollup_rows=%d pruned_rows=%d retention_days=%d",
-					res.RolledDays, res.RollupRows, res.PrunedRows, res.RetentionDays)
+			if res.PrunedRows > 0 || res.PrunedAuditRows > 0 {
+				log.Printf("analytics maintenance: pruned_rows=%d pruned_audit_rows=%d retention_days=%d",
+					res.PrunedRows, res.PrunedAuditRows, res.RetentionDays)
 			}
 		}
 
@@ -182,12 +186,39 @@ func jsonCreated(w http.ResponseWriter, data interface{}) {
 	}
 }
 
-func (s *Server) getSessionID(r *http.Request) string {
-	cookie, err := r.Cookie("acetate_session")
+const (
+	listenerCookie = "acetate_session"
+	adminCookie    = "acetate_admin"
+)
+
+func cookieValue(r *http.Request, name string) string {
+	cookie, err := r.Cookie(name)
 	if err != nil {
 		return ""
 	}
 	return cookie.Value
+}
+
+// setListenerCookie sets, or with maxAge -1 clears, the listener session cookie.
+func setListenerCookie(w http.ResponseWriter, r *http.Request, value string, maxAge int) {
+	setSessionCookie(w, r, listenerCookie, "/", value, maxAge)
+}
+
+// setAdminCookie sets, or with maxAge -1 clears, the admin session cookie.
+func setAdminCookie(w http.ResponseWriter, r *http.Request, value string, maxAge int) {
+	setSessionCookie(w, r, adminCookie, "/admin", value, maxAge)
+}
+
+func setSessionCookie(w http.ResponseWriter, r *http.Request, name, path, value string, maxAge int) {
+	http.SetCookie(w, &http.Cookie{
+		Name:     name,
+		Value:    value,
+		Path:     path,
+		MaxAge:   maxAge,
+		HttpOnly: true,
+		Secure:   isSecureRequest(r),
+		SameSite: http.SameSiteStrictMode,
+	})
 }
 
 // bodyLimiter middleware limits the request body size.
@@ -224,10 +255,12 @@ func trimAndCollapseSpaces(s string) string {
 	return strings.Join(strings.Fields(strings.TrimSpace(s)), " ")
 }
 
-func normalizeStemParam(raw string) (string, error) {
-	stem, err := url.PathUnescape(raw)
-	if err != nil {
-		return "", err
+// urlID parses the positive integer {id} URL parameter, answering 400 when it is not one.
+func urlID(w http.ResponseWriter, r *http.Request) (int64, bool) {
+	id, err := strconv.ParseInt(chi.URLParam(r, "id"), 10, 64)
+	if err != nil || id <= 0 {
+		jsonError(w, "bad request", http.StatusBadRequest)
+		return 0, false
 	}
-	return strings.TrimSpace(stem), nil
+	return id, true
 }

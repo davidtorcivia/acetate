@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"acetate/internal/albums"
+	"acetate/internal/auth"
 	"acetate/internal/database"
 	"acetate/internal/server"
 )
@@ -30,6 +31,11 @@ func main() {
 
 	if strings.TrimSpace(legacyAdminToken) != "" {
 		log.Println("WARNING: ADMIN_TOKEN is deprecated and ignored; use ADMIN_USERNAME + ADMIN_PASSWORD_HASH")
+	}
+
+	clientIPs, err := auth.NewClientIPResolver(os.Getenv("TRUSTED_PROXIES"))
+	if err != nil {
+		log.Fatalf("TRUSTED_PROXIES: %v", err)
 	}
 
 	// Open database
@@ -51,6 +57,9 @@ func main() {
 	// Migrate legacy config.json into database if needed
 	if err := albums.MigrateFromConfigJSON(db, dataPath, albumPath); err != nil {
 		log.Fatalf("migrate config: %v", err)
+	}
+	if err := albums.MigrateLegacyCover(db, dataPath); err != nil {
+		log.Fatalf("migrate legacy cover: %v", err)
 	}
 
 	// Create album store
@@ -79,6 +88,7 @@ func main() {
 		MaintenanceInterval:    maintenanceInterval,
 		DB:                     db,
 		AlbumStore:             albumStore,
+		ClientIPs:              clientIPs,
 	})
 
 	// Graceful shutdown

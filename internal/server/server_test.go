@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"acetate/internal/albums"
+	"acetate/internal/auth"
 	"acetate/internal/database"
 
 	"golang.org/x/crypto/bcrypt"
@@ -99,7 +100,6 @@ func setupTestWithBootstrap(t *testing.T, username, password, passwordHash strin
 		srv.collector.Close()
 		srv.sessions.Close()
 		srv.rateLimiter.Close()
-		srv.cfIPs.Close()
 	})
 
 	return &testEnv{srv: srv, ts: ts, albumDir: albumDir, dataDir: dataDir, albumSlug: alb.Slug, albumID: alb.ID}
@@ -684,7 +684,7 @@ func TestLogout(t *testing.T) {
 	}
 
 	// Session should be invalid now
-	req, _ = http.NewRequest("GET", env.ts.URL+"/api/session", nil)
+	req, _ = http.NewRequest("GET", env.ts.URL+"/api/albums/"+env.albumSlug+"/tracks", nil)
 	for _, c := range cookies {
 		req.AddCookie(c)
 	}
@@ -1382,8 +1382,8 @@ func TestMultiAlbumAccessDeniedForUnauthorizedAlbum(t *testing.T) {
 	}
 	resp.Body.Close()
 
-	if resp.StatusCode != http.StatusForbidden {
-		t.Fatalf("unauthorized album access status = %d, want 403", resp.StatusCode)
+	if resp.StatusCode != http.StatusNotFound {
+		t.Fatalf("unauthorized album access status = %d, want 404", resp.StatusCode)
 	}
 }
 
@@ -1445,8 +1445,8 @@ func TestMultiAlbumStreamFromCorrectDirectory(t *testing.T) {
 	}
 	resp2.Body.Close()
 
-	if resp2.StatusCode != http.StatusForbidden {
-		t.Fatalf("cross-album access status = %d, want 403", resp2.StatusCode)
+	if resp2.StatusCode != http.StatusNotFound {
+		t.Fatalf("cross-album access status = %d, want 404", resp2.StatusCode)
 	}
 }
 
@@ -1648,7 +1648,7 @@ func TestSessionWithoutPasswordIDDenied(t *testing.T) {
 	// Manually insert a session without password_id to simulate a legacy session
 	_, err := env.srv.db.Exec(
 		"INSERT INTO sessions (id, started_at, last_seen_at, ip_hash) VALUES (?, ?, ?, ?)",
-		"deadbeef"+strings.Repeat("00", 28), time.Now().UTC(), time.Now().UTC(), "test",
+		auth.HashToken("deadbeef"+strings.Repeat("00", 28)), time.Now().UTC(), time.Now().UTC(), "test",
 	)
 	if err != nil {
 		t.Fatalf("insert legacy session: %v", err)
@@ -1663,7 +1663,7 @@ func TestSessionWithoutPasswordIDDenied(t *testing.T) {
 	}
 	resp.Body.Close()
 
-	if resp.StatusCode != http.StatusForbidden {
-		t.Fatalf("legacy session access status = %d, want 403", resp.StatusCode)
+	if resp.StatusCode != http.StatusNotFound {
+		t.Fatalf("legacy session access status = %d, want 404", resp.StatusCode)
 	}
 }

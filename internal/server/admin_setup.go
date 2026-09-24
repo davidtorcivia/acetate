@@ -5,6 +5,8 @@ import (
 	"log"
 	"net/http"
 	"strings"
+
+	"acetate/internal/auth"
 )
 
 func (s *Server) handleAdminSetupStatus(w http.ResponseWriter, r *http.Request) {
@@ -32,8 +34,8 @@ func (s *Server) handleAdminSetupBootstrap(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
-	clientIP := s.cfIPs.GetClientIP(r)
-	if !s.rateLimiter.Allow("admin:setup:" + clientIP) {
+	clientIP := s.clientIPs.ClientIP(r)
+	if !s.rateLimiter.Allow("setup:"+auth.RateKey(clientIP), adminSetupLimit) {
 		jsonError(w, "rate limited", http.StatusTooManyRequests)
 		return
 	}
@@ -53,35 +55,24 @@ func (s *Server) handleAdminSetupBootstrap(w http.ResponseWriter, r *http.Reques
 		case errors.Is(err, errAdminAlreadyConfigured):
 			jsonError(w, "already configured", http.StatusConflict)
 		case errors.Is(err, errAdminWeakPassword):
-			jsonError(w, "password does not meet policy", http.StatusBadRequest)
+			jsonError(w, err.Error(), http.StatusBadRequest)
+		case errors.Is(err, errAdminInvalidUsername):
+			jsonError(w, err.Error(), http.StatusBadRequest)
 		default:
-			// normalizeAdminUsername returns plain errors for format issues.
-			if strings.Contains(strings.ToLower(err.Error()), "username") {
-				jsonError(w, "invalid username", http.StatusBadRequest)
-			} else {
-				log.Printf("admin setup create user error: %v", err)
-				jsonError(w, "internal error", http.StatusInternalServerError)
-			}
+			log.Printf("admin setup create user error: %v", err)
+			jsonError(w, "internal error", http.StatusInternalServerError)
 		}
 		return
 	}
 
-	sessionID, err := s.sessions.CreateAdminSessionWithContext(user.ID, clientIP, strings.TrimSpace(r.UserAgent()))
+	sessionID, err := s.sessions.CreateAdminSession(user.ID, auth.RateKey(clientIP), strings.TrimSpace(r.UserAgent()))
 	if err != nil {
 		log.Printf("admin setup create session error: %v", err)
 		jsonError(w, "internal error", http.StatusInternalServerError)
 		return
 	}
 
-	http.SetCookie(w, &http.Cookie{
-		Name:     "acetate_admin",
-		Value:    sessionID,
-		Path:     "/admin",
-		MaxAge:   3600, // 1 hour
-		HttpOnly: true,
-		Secure:   isSecureRequest(r),
-		SameSite: http.SameSiteStrictMode,
-	})
+	setAdminCookie(w, r, sessionID, int(auth.AdminSessionExpiry.Seconds()))
 
 	s.recordAdminAuthAttempt(r, user.Username, "success", "bootstrap_setup")
 	jsonCreated(w, map[string]interface{}{

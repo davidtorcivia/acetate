@@ -98,12 +98,12 @@ func TestAdminSession(t *testing.T) {
 	store := testDB(t)
 	adminUserID := seedAdminUser(t, store)
 
-	id, err := store.CreateAdminSessionWithContext(adminUserID, "127.0.0.1", "test-agent")
+	id, err := store.CreateAdminSession(adminUserID, "127.0.0.1", "test-agent")
 	if err != nil {
-		t.Fatalf("CreateAdminSessionWithContext: %v", err)
+		t.Fatalf("CreateAdminSession: %v", err)
 	}
 
-	valid, err := store.ValidateAdminSession(id)
+	valid, _, _, err := store.ValidateAdminSession(id, "", "")
 	if err != nil {
 		t.Fatalf("ValidateAdminSession: %v", err)
 	}
@@ -115,7 +115,7 @@ func TestAdminSession(t *testing.T) {
 		t.Fatalf("DeleteAdminSession: %v", err)
 	}
 
-	valid, err = store.ValidateAdminSession(id)
+	valid, _, _, err = store.ValidateAdminSession(id, "", "")
 	if err != nil {
 		t.Fatalf("ValidateAdminSession after delete: %v", err)
 	}
@@ -128,22 +128,22 @@ func TestAdminSessionFingerprintBinding(t *testing.T) {
 	store := testDB(t)
 	adminUserID := seedAdminUser(t, store)
 
-	id, err := store.CreateAdminSessionWithContext(adminUserID, "127.0.0.1", "test-agent")
+	id, err := store.CreateAdminSession(adminUserID, "127.0.0.1", "test-agent")
 	if err != nil {
-		t.Fatalf("CreateAdminSessionWithContext: %v", err)
+		t.Fatalf("CreateAdminSession: %v", err)
 	}
 
-	valid, _, _, err := store.ValidateAdminSessionWithContext(id, "127.0.0.1", "test-agent")
+	valid, _, _, err := store.ValidateAdminSession(id, "127.0.0.1", "test-agent")
 	if err != nil {
-		t.Fatalf("ValidateAdminSessionWithContext: %v", err)
+		t.Fatalf("ValidateAdminSession: %v", err)
 	}
 	if !valid {
 		t.Fatal("session should validate for same fingerprint")
 	}
 
-	valid, _, _, err = store.ValidateAdminSessionWithContext(id, "127.0.0.2", "test-agent")
+	valid, _, _, err = store.ValidateAdminSession(id, "127.0.0.2", "test-agent")
 	if err != nil {
-		t.Fatalf("ValidateAdminSessionWithContext mismatch: %v", err)
+		t.Fatalf("ValidateAdminSession mismatch: %v", err)
 	}
 	if valid {
 		t.Fatal("session should be invalid for mismatched fingerprint")
@@ -193,8 +193,25 @@ func TestCleanup(t *testing.T) {
 
 	store.cleanup()
 
-	valid, _, _ := store.ValidateSession("expired-session")
-	if valid {
+	var n int
+	store.db.QueryRow("SELECT COUNT(*) FROM sessions WHERE id = 'expired-session'").Scan(&n)
+	if n != 0 {
 		t.Error("expired session should have been cleaned up")
+	}
+}
+
+func TestSessionTokensStoredHashed(t *testing.T) {
+	store := testDB(t)
+	token, err := store.CreateSession("127.0.0.1", 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var n int
+	store.db.QueryRow("SELECT COUNT(*) FROM sessions WHERE id = ?", token).Scan(&n)
+	if n != 0 {
+		t.Fatal("raw session token found in the database")
+	}
+	if valid, _, err := store.ValidateSession(token); err != nil || !valid {
+		t.Fatalf("ValidateSession(token) = %v, %v", valid, err)
 	}
 }

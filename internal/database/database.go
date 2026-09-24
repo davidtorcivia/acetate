@@ -10,14 +10,15 @@ import (
 )
 
 // Open creates or opens the SQLite database at the given data path.
-// It enables WAL mode and sets a busy timeout for concurrent access.
+// Every pooled connection gets WAL, a busy timeout, and foreign key enforcement
+// (SQLite leaves foreign keys off per connection unless asked).
 func Open(dataPath string) (*sql.DB, error) {
 	if err := os.MkdirAll(dataPath, 0755); err != nil {
 		return nil, fmt.Errorf("create data directory: %w", err)
 	}
 
 	dbPath := filepath.Join(dataPath, "acetate.db")
-	db, err := sql.Open("sqlite", dbPath+"?_pragma=busy_timeout(5000)&_pragma=journal_mode(WAL)")
+	db, err := sql.Open("sqlite", dbPath+"?_pragma=busy_timeout(5000)&_pragma=journal_mode(WAL)&_pragma=synchronous(NORMAL)&_pragma=foreign_keys(1)")
 	if err != nil {
 		return nil, fmt.Errorf("open database: %w", err)
 	}

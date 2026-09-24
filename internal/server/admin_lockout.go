@@ -14,8 +14,9 @@ const (
 )
 
 type adminLoginGuard struct {
-	mu      sync.Mutex
-	entries map[string]adminLoginEntry
+	mu        sync.Mutex
+	entries   map[string]adminLoginEntry
+	lastPurge time.Time
 }
 
 type adminLoginEntry struct {
@@ -91,7 +92,12 @@ func (g *adminLoginGuard) markSuccess(key string) {
 	g.mu.Unlock()
 }
 
+// purgeStale drops expired entries, scanning at most once a minute.
 func (g *adminLoginGuard) purgeStale(now time.Time) {
+	if now.Sub(g.lastPurge) < time.Minute {
+		return
+	}
+	g.lastPurge = now
 	for key, entry := range g.entries {
 		if now.Sub(entry.lastFailure) > adminLoginEntryTTL {
 			delete(g.entries, key)

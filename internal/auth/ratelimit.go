@@ -5,10 +5,8 @@ import (
 	"time"
 )
 
-const (
-	RateLimit  = 5
-	RateWindow = 1 * time.Minute
-)
+// RateWindow is the sliding window every limit applies over.
+const RateWindow = 1 * time.Minute
 
 // RateLimiter implements a per-IP sliding window rate limiter.
 type RateLimiter struct {
@@ -39,19 +37,19 @@ func (rl *RateLimiter) Close() {
 	})
 }
 
-// Allow checks if the given IP is within the rate limit.
-// Returns true if the request is allowed.
-func (rl *RateLimiter) Allow(ip string) bool {
+// Allow records an attempt for key and reports whether it is within limit
+// attempts per RateWindow.
+func (rl *RateLimiter) Allow(key string, limit int) bool {
 	rl.mu.Lock()
 	defer rl.mu.Unlock()
 
 	now := time.Now()
 	cutoff := now.Add(-RateWindow)
 
-	w, ok := rl.windows[ip]
+	w, ok := rl.windows[key]
 	if !ok {
 		w = &window{}
-		rl.windows[ip] = w
+		rl.windows[key] = w
 	}
 
 	// Prune old attempts
@@ -63,7 +61,7 @@ func (rl *RateLimiter) Allow(ip string) bool {
 	}
 	w.attempts = valid
 
-	if len(w.attempts) >= RateLimit {
+	if len(w.attempts) >= limit {
 		return false
 	}
 

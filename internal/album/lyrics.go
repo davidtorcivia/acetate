@@ -2,7 +2,6 @@ package album
 
 import (
 	"bytes"
-	"net/http"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -21,7 +20,7 @@ type LyricsResponse struct {
 }
 
 // ServeLyrics finds and serves lyrics for a track stem.
-func ServeLyrics(w http.ResponseWriter, albumPath, stem string) *LyricsResponse {
+func ServeLyrics(albumPath, stem string) *LyricsResponse {
 	// Priority: lrc > txt > md
 	checks := []struct {
 		ext    string

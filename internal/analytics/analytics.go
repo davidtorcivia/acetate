@@ -12,7 +12,8 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
-	"unicode"
+
+	"acetate/internal/album"
 )
 
 const (
@@ -84,10 +85,23 @@ func NewCollector(db *sql.DB) *Collector {
 // Record submits an event to the analytics channel.
 // High-value events block briefly (100ms); low-value events are dropped immediately if full.
 func (c *Collector) Record(e Event) {
+	ctx, cancel := context.WithTimeout(context.Background(), highValueWait)
+	defer cancel()
+	c.record(e, ctx.Done())
+}
+
+const (
+	// highValueWait is how long high-value events may wait for channel space.
+	highValueWait = 100 * time.Millisecond
+	// maxPositionSeconds bounds client-reported positions and durations.
+	maxPositionSeconds = 24 * 60 * 60
+)
+
+func (c *Collector) record(e Event, deadline <-chan struct{}) {
 	if highValueEvents[e.EventType] {
 		select {
 		case c.events <- e:
-		case <-time.After(100 * time.Millisecond):
+		case <-deadline:
 			c.dropped.Add(1)
 		}
 	} else {
@@ -242,8 +256,10 @@ func (c *Collector) flush(batch []Event) {
 	}
 }
 
-// RecordBatch parses and records a batch of events from JSON.
-func (c *Collector) RecordBatch(sessionID string, data []byte, albumID int64) error {
+// RecordBatch parses and records a batch of events from JSON. Events naming a
+// stem outside stems are rejected. The whole batch shares one backpressure
+// deadline, so a full channel delays a request by at most highValueWait.
+func (c *Collector) RecordBatch(sessionID string, data []byte, albumID int64, stems map[string]bool) error {
 	if !validSessionID(sessionID) {
 		return errors.New("invalid session")
 	}
@@ -262,16 +278,19 @@ func (c *Collector) RecordBatch(sessionID string, data []byte, albumID int64) er
 		return errors.New("too many events")
 	}
 
+	ctx, cancel := context.WithTimeout(context.Background(), highValueWait)
+	defer cancel()
+
 	var rejected int64
 	for _, e := range events {
 		normalized, ok := normalizeBatchEvent(e)
-		if !ok {
+		if !ok || (normalized.TrackStem != "" && !stems[normalized.TrackStem]) {
 			rejected++
 			continue
 		}
 		normalized.SessionID = sessionID
 		normalized.AlbumID = albumID
-		c.Record(normalized)
+		c.record(normalized, ctx.Done())
 	}
 
 	if rejected > 0 {
@@ -279,27 +298,6 @@ func (c *Collector) RecordBatch(sessionID string, data []byte, albumID int64) er
 	}
 
 	return nil
-}
-
-func validTrackStem(stem string) bool {
-	stem = strings.TrimSpace(stem)
-	if stem == "" || len(stem) > 255 {
-		return false
-	}
-	if strings.ContainsAny(stem, `/\.`) {
-		return false
-	}
-	if stem == "." || stem == ".." {
-		return false
-	}
-
-	for _, r := range stem {
-		if unicode.IsControl(r) || r == 0 {
-			return false
-		}
-	}
-
-	return true
 }
 
 func normalizeBatchEvent(raw struct {
@@ -313,12 +311,12 @@ func normalizeBatchEvent(raw struct {
 		return Event{}, false
 	}
 
-	trackStem := strings.TrimSpace(raw.TrackStem)
-	if trackStem != "" && !validTrackStem(trackStem) {
+	trackStem := raw.TrackStem
+	if trackStem != "" && !album.ValidateStem(trackStem) {
 		return Event{}, false
 	}
 
-	if raw.PositionSeconds < 0 || raw.PositionSeconds > 24*60*60 {
+	if raw.PositionSeconds < 0 || raw.PositionSeconds > maxPositionSeconds {
 		return Event{}, false
 	}
 
@@ -357,9 +355,14 @@ func requiresTrackStem(eventType string) bool {
 }
 
 func validEventByType(eventType, trackStem string, position float64, metadata map[string]interface{}) bool {
+	if _, ok := metadata["duration"]; ok {
+		if d := positiveNumber(metadata, "duration"); d < 1 || d > maxPositionSeconds {
+			return false
+		}
+	}
 	switch eventType {
 	case "seek":
-		if !hasNumericField(metadata, "from_position") || !hasNumericField(metadata, "to_position") {
+		if !hasNumericField(metadata, "from") || !hasNumericField(metadata, "to") {
 			return false
 		}
 	case "pause", "dropout":
@@ -465,6 +468,19 @@ func hasNumericField(obj map[string]interface{}, key string) bool {
 	default:
 		return false
 	}
+}
+
+// positiveNumber returns obj[key] as a float when it is a positive number, else 0.
+func positiveNumber(obj map[string]interface{}, key string) float64 {
+	n, ok := obj[key].(json.Number)
+	if !ok {
+		return 0
+	}
+	f, err := n.Float64()
+	if err != nil || f <= 0 {
+		return 0
+	}
+	return f
 }
 
 func validSessionID(sessionID string) bool {

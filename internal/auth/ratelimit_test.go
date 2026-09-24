@@ -11,19 +11,19 @@ func TestRateLimiterAllow(t *testing.T) {
 	ip := "192.168.1.1"
 
 	// First 5 should be allowed
-	for i := 0; i < RateLimit; i++ {
-		if !rl.Allow(ip) {
+	for i := 0; i < 5; i++ {
+		if !rl.Allow(ip, 5) {
 			t.Errorf("attempt %d should be allowed", i+1)
 		}
 	}
 
 	// 6th should be denied
-	if rl.Allow(ip) {
+	if rl.Allow(ip, 5) {
 		t.Error("6th attempt should be denied")
 	}
 
 	// Different IP should still be allowed
-	if !rl.Allow("10.0.0.1") {
+	if !rl.Allow("10.0.0.1", 5) {
 		t.Error("different IP should be allowed")
 	}
 }
@@ -32,7 +32,7 @@ func TestRateLimiterPurge(t *testing.T) {
 	rl := NewRateLimiter()
 	defer rl.Close()
 
-	rl.Allow("192.168.1.1")
+	rl.Allow("192.168.1.1", 5)
 
 	// Manually set old timestamps to simulate expiry
 	rl.mu.Lock()

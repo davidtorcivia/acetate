@@ -16,16 +16,17 @@ const (
 	minAdminUsernameLen = 3
 	maxAdminUsernameLen = 64
 	minAdminPasswordLen = 12
-	maxAdminPasswordLen = 256
+	maxAdminPasswordLen = 72 // bcrypt rejects longer input
 )
 
 var (
 	adminUsernameRe           = regexp.MustCompile(`^[a-z0-9._-]+$`)
 	dummyAdminPasswordHash    = "$2a$10$7EqJtq98hPqEX7fNZaFWo.O9JmMbiY4rQ6hJ7PV5K56ZtPcNI0fS"
 	errAdminInvalidCreds      = errors.New("invalid admin credentials")
-	errAdminWeakPassword      = errors.New("weak admin password")
+	errAdminWeakPassword      = errors.New("password must be 12-72 characters and include a letter and a digit")
 	errAdminBootstrapMissing  = errors.New("admin bootstrap credentials not configured")
 	errAdminAlreadyConfigured = errors.New("admin already configured")
+	errAdminInvalidUsername   = errors.New("invalid username")
 )
 
 // ErrAdminBootstrapMissing indicates startup bootstrap credentials were not provided
@@ -51,7 +52,7 @@ func EnsureAdminBootstrap(db *sql.DB, username, password, passwordHash string) e
 
 	normalizedUsername, err := normalizeAdminUsername(username)
 	if err != nil {
-		return err
+		return fmt.Errorf("ADMIN_USERNAME: %w", err)
 	}
 
 	hash, err := resolveAdminPasswordHash(password, passwordHash)
@@ -113,11 +114,8 @@ func normalizeAdminUsername(username string) (string, error) {
 	if u == "" {
 		u = "admin"
 	}
-	if len(u) < minAdminUsernameLen || len(u) > maxAdminUsernameLen {
-		return "", errors.New("invalid ADMIN_USERNAME length")
-	}
-	if !adminUsernameRe.MatchString(u) {
-		return "", errors.New("invalid ADMIN_USERNAME format")
+	if len(u) < minAdminUsernameLen || len(u) > maxAdminUsernameLen || !adminUsernameRe.MatchString(u) {
+		return "", fmt.Errorf("%w: use %d-%d characters of a-z, 0-9, '.', '_' or '-'", errAdminInvalidUsername, minAdminUsernameLen, maxAdminUsernameLen)
 	}
 	return u, nil
 }
@@ -166,7 +164,7 @@ func (s *Server) authenticateAdminCredentials(username, password string) (adminU
 		return user, fmt.Errorf("query admin user: %w", err)
 	}
 
-	if bcrypt.CompareHashAndPassword([]byte(user.PasswordHash), []byte(password)) != nil {
+	if bcrypt.CompareHashAndPassword([]byte(user.PasswordHash), []byte(strings.TrimSpace(password))) != nil {
 		return adminUserRecord{}, errAdminInvalidCreds
 	}
 	user.RequirePasswordReset = requireReset == 1
@@ -196,7 +194,7 @@ func (s *Server) updateAdminPassword(userID int64, currentPassword, newPassword 
 		return fmt.Errorf("query current admin password: %w", err)
 	}
 
-	if bcrypt.CompareHashAndPassword([]byte(currentHash), []byte(currentPassword)) != nil {
+	if bcrypt.CompareHashAndPassword([]byte(currentHash), []byte(strings.TrimSpace(currentPassword))) != nil {
 		return errAdminInvalidCreds
 	}
 
@@ -248,14 +246,6 @@ func (s *Server) needsAdminSetup() (bool, error) {
 func (s *Server) createInitialAdminUser(username, password string) (adminUserRecord, error) {
 	user := adminUserRecord{}
 
-	needsSetup, err := s.needsAdminSetup()
-	if err != nil {
-		return user, err
-	}
-	if !needsSetup {
-		return user, errAdminAlreadyConfigured
-	}
-
 	normalizedUsername, err := normalizeAdminUsername(username)
 	if err != nil {
 		return user, err
@@ -269,13 +259,19 @@ func (s *Server) createInitialAdminUser(username, password string) (adminUserRec
 		return user, fmt.Errorf("hash bootstrap admin password: %w", err)
 	}
 
+	// The NOT EXISTS guard makes concurrent setup requests create one admin, not two.
 	now := time.Now().UTC()
 	res, err := s.db.Exec(
-		"INSERT INTO admin_users (username, password_hash, is_active, created_at, updated_at, last_login_at) VALUES (?, ?, 1, ?, ?, ?)",
+		"INSERT INTO admin_users (username, password_hash, is_active, created_at, updated_at, last_login_at) SELECT ?, ?, 1, ?, ?, ? WHERE NOT EXISTS (SELECT 1 FROM admin_users)",
 		normalizedUsername, string(hash), now, now, now,
 	)
 	if err != nil {
 		return user, fmt.Errorf("create bootstrap admin user: %w", err)
+	}
+	if n, err := res.RowsAffected(); err != nil {
+		return user, fmt.Errorf("create bootstrap admin user: %w", err)
+	} else if n == 0 {
+		return user, errAdminAlreadyConfigured
 	}
 
 	id, err := res.LastInsertId()

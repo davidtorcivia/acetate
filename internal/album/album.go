@@ -43,16 +43,6 @@ func ValidateStem(stem string) bool {
 	return true
 }
 
-// StemInTracks checks if the stem exists in the given track list.
-func StemInTracks(stem string, tracks []albums.Track) bool {
-	for _, t := range tracks {
-		if t.Stem == stem {
-			return true
-		}
-	}
-	return false
-}
-
 // GetTrackList builds the track list response with lyric format info.
 func GetTrackList(tracks []albums.Track, albumPath string) []TrackInfo {
 	out := make([]TrackInfo, 0, len(tracks))
@@ -82,32 +72,23 @@ func detectLyricFormat(albumPath, stem string) string {
 	return ""
 }
 
+// CoverOverrideName is the file an admin-uploaded cover is stored under, in
+// dataPath/covers/<album id>/.
+const CoverOverrideName = "cover_override.jpg"
+
+// ServeCover serves the album's uploaded cover, else a cover image from the
+// album folder.
 func ServeCover(w http.ResponseWriter, r *http.Request, albumPath, dataPath string, albumID int64) {
-	// Check for per-album admin-uploaded override first.
-	if albumID > 0 {
-		overridePath := filepath.Join(dataPath, "covers", strconv.FormatInt(albumID, 10), "cover_override.jpg")
-		if info, err := os.Stat(overridePath); err == nil {
-			serveCoverFile(w, r, overridePath, info)
-			return
-		}
-	}
-
-	// Legacy global override (for pre-migration albums).
-	overridePath := filepath.Join(dataPath, "cover_override.jpg")
-	if info, err := os.Stat(overridePath); err == nil {
-		serveCoverFile(w, r, overridePath, info)
-		return
-	}
-
-	// Fall back to album directory cover.
+	candidates := []string{filepath.Join(dataPath, "covers", strconv.FormatInt(albumID, 10), CoverOverrideName)}
 	for _, name := range []string{"cover.jpg", "cover.jpeg", "cover.png"} {
-		coverPath := filepath.Join(albumPath, name)
-		if info, err := os.Stat(coverPath); err == nil {
-			serveCoverFile(w, r, coverPath, info)
+		candidates = append(candidates, filepath.Join(albumPath, name))
+	}
+	for _, path := range candidates {
+		if info, err := os.Stat(path); err == nil && !info.IsDir() {
+			serveCoverFile(w, r, path, info)
 			return
 		}
 	}
-
 	http.NotFound(w, r)
 }
 

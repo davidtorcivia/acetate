@@ -18,7 +18,6 @@ const (
 	AdminSessionExpiry = 1 * time.Hour
 	CleanupInterval    = 1 * time.Hour
 	SessionTouchWindow = 1 * time.Minute
-	AdminTouchWindow   = 5 * time.Minute
 )
 
 // SessionStore manages listener and admin sessions in SQLite.
@@ -67,7 +66,7 @@ func (s *SessionStore) CreateSession(ip string, passwordID int64) (string, error
 
 	_, err = s.db.Exec(
 		"INSERT INTO sessions (id, started_at, last_seen_at, ip_hash, password_id) VALUES (?, ?, ?, ?, ?)",
-		id, now, now, ipHash, passwordID,
+		HashToken(id), now, now, ipHash, passwordID,
 	)
 	if err != nil {
 		return "", fmt.Errorf("create session: %w", err)
@@ -78,7 +77,8 @@ func (s *SessionStore) CreateSession(ip string, passwordID int64) (string, error
 
 // ValidateSession checks if a session ID is valid and not expired.
 // On success, it updates last_seen_at (sliding window) and returns the password_id.
-func (s *SessionStore) ValidateSession(id string) (bool, int64, error) {
+func (s *SessionStore) ValidateSession(token string) (bool, int64, error) {
+	id := HashToken(token)
 	var lastSeen time.Time
 	var passwordID sql.NullInt64
 	err := s.db.QueryRow(
@@ -114,13 +114,13 @@ func (s *SessionStore) ValidateSession(id string) (bool, int64, error) {
 }
 
 // DeleteSession removes a listener session.
-func (s *SessionStore) DeleteSession(id string) error {
-	_, err := s.db.Exec("DELETE FROM sessions WHERE id = ?", id)
+func (s *SessionStore) DeleteSession(token string) error {
+	_, err := s.db.Exec("DELETE FROM sessions WHERE id = ?", HashToken(token))
 	return err
 }
 
-// CreateAdminSessionWithContext generates a new admin session bound to coarse client fingerprints.
-func (s *SessionStore) CreateAdminSessionWithContext(userID int64, ip, userAgent string) (string, error) {
+// CreateAdminSession generates a new admin session bound to coarse client fingerprints.
+func (s *SessionStore) CreateAdminSession(userID int64, ip, userAgent string) (string, error) {
 	if userID <= 0 {
 		return "", fmt.Errorf("create admin session: invalid user id")
 	}
@@ -136,7 +136,7 @@ func (s *SessionStore) CreateAdminSessionWithContext(userID int64, ip, userAgent
 
 	_, err = s.db.Exec(
 		"INSERT INTO admin_sessions (id, created_at, last_seen_at, ip_hash, user_agent_hash, user_id) VALUES (?, ?, ?, ?, ?, ?)",
-		id, now, now, ipHash, uaHash, userID,
+		HashToken(id), now, now, ipHash, uaHash, userID,
 	)
 	if err != nil {
 		return "", fmt.Errorf("create admin session: %w", err)
@@ -145,25 +145,21 @@ func (s *SessionStore) CreateAdminSessionWithContext(userID int64, ip, userAgent
 	return id, nil
 }
 
-// ValidateAdminSession checks if an admin session is valid (1 hour, no sliding).
-func (s *SessionStore) ValidateAdminSession(id string) (bool, error) {
-	valid, _, _, err := s.ValidateAdminSessionWithContext(id, "", "")
-	return valid, err
-}
-
-// ValidateAdminSessionWithContext checks if an admin session is valid and optionally verifies client fingerprints.
-func (s *SessionStore) ValidateAdminSessionWithContext(id, ip, userAgent string) (bool, int64, bool, error) {
+// ValidateAdminSession checks an admin session against its absolute 1-hour
+// lifetime and, when ip or userAgent are non-empty, its client fingerprints.
+// It returns validity, the admin user ID, and whether a password reset is pending.
+func (s *SessionStore) ValidateAdminSession(token, ip, userAgent string) (bool, int64, bool, error) {
+	id := HashToken(token)
 	var createdAt time.Time
-	var lastSeenAt sql.NullTime
 	var storedIPHash sql.NullString
 	var storedUAHash sql.NullString
 	var userID sql.NullInt64
 	var isActive sql.NullInt64
 	var requirePasswordReset sql.NullInt64
 	err := s.db.QueryRow(
-		"SELECT s.created_at, s.last_seen_at, s.ip_hash, s.user_agent_hash, s.user_id, u.is_active, u.require_password_reset FROM admin_sessions s LEFT JOIN admin_users u ON s.user_id = u.id WHERE s.id = ?",
+		"SELECT s.created_at, s.ip_hash, s.user_agent_hash, s.user_id, u.is_active, u.require_password_reset FROM admin_sessions s LEFT JOIN admin_users u ON s.user_id = u.id WHERE s.id = ?",
 		id,
-	).Scan(&createdAt, &lastSeenAt, &storedIPHash, &storedUAHash, &userID, &isActive, &requirePasswordReset)
+	).Scan(&createdAt, &storedIPHash, &storedUAHash, &userID, &isActive, &requirePasswordReset)
 	if err == sql.ErrNoRows {
 		return false, 0, false, nil
 	}
@@ -199,19 +195,13 @@ func (s *SessionStore) ValidateAdminSessionWithContext(id, ip, userAgent string)
 		}
 	}
 
-	if !lastSeenAt.Valid || time.Since(lastSeenAt.Time.UTC()) >= AdminTouchWindow {
-		if _, err := s.db.Exec("UPDATE admin_sessions SET last_seen_at = ? WHERE id = ?", time.Now().UTC(), id); err != nil {
-			return false, 0, false, fmt.Errorf("touch admin session: %w", err)
-		}
-	}
-
 	needsReset := requirePasswordReset.Valid && requirePasswordReset.Int64 == 1
 	return true, userID.Int64, needsReset, nil
 }
 
 // DeleteAdminSession removes an admin session.
-func (s *SessionStore) DeleteAdminSession(id string) error {
-	_, err := s.db.Exec("DELETE FROM admin_sessions WHERE id = ?", id)
+func (s *SessionStore) DeleteAdminSession(token string) error {
+	_, err := s.db.Exec("DELETE FROM admin_sessions WHERE id = ?", HashToken(token))
 	return err
 }
 
@@ -222,13 +212,6 @@ func (s *SessionStore) DeleteAdminSessionsForUser(userID int64) error {
 	}
 	_, err := s.db.Exec("DELETE FROM admin_sessions WHERE user_id = ?", userID)
 	return err
-}
-
-func isLikelyBcryptHash(v string) bool {
-	if len(v) < 59 {
-		return false
-	}
-	return strings.HasPrefix(v, "$2a$") || strings.HasPrefix(v, "$2b$") || strings.HasPrefix(v, "$2y$")
 }
 
 func (s *SessionStore) cleanupLoop() {
@@ -255,6 +238,13 @@ func (s *SessionStore) cleanup() {
 	if _, err := s.db.Exec("DELETE FROM admin_sessions WHERE created_at < ?", adminCutoff); err != nil {
 		log.Printf("admin session cleanup error: %v", err)
 	}
+}
+
+// HashToken is the at-rest form of a session token: the database (and so any
+// backup of it) never holds a value that works as a cookie.
+func HashToken(token string) string {
+	sum := sha256.Sum256([]byte(token))
+	return hex.EncodeToString(sum[:])
 }
 
 func generateSessionID() (string, error) {

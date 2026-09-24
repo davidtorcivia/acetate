@@ -2,6 +2,7 @@ package albums
 
 import (
 	"database/sql"
+	"errors"
 	"fmt"
 	"regexp"
 	"strings"
@@ -9,6 +10,9 @@ import (
 
 	"golang.org/x/crypto/bcrypt"
 )
+
+// ErrNotFound reports that the row being updated does not exist.
+var ErrNotFound = errors.New("not found")
 
 // Album represents an album in the database.
 type Album struct {
@@ -56,7 +60,7 @@ func NewStore(db *sql.DB) *Store {
 
 // CreateAlbum inserts a new album and returns it.
 func (s *Store) CreateAlbum(title, artist, albumPath string) (*Album, error) {
-	slug, err := s.uniqueSlug(generateSlug(title))
+	slug, err := s.uniqueSlug(generateSlug(title), 0)
 	if err != nil {
 		return nil, err
 	}
@@ -133,7 +137,7 @@ func (s *Store) UpdateAlbum(id int64, title, artist string) error {
 
 	slug := existing.Slug
 	if title != existing.Title {
-		slug, err = s.uniqueSlug(generateSlug(title))
+		slug, err = s.uniqueSlug(generateSlug(title), id)
 		if err != nil {
 			return err
 		}
@@ -161,18 +165,10 @@ func (s *Store) SetDownloadsEnabled(id int64, enabled bool) error {
 	return err
 }
 
-// DeleteAlbum removes an album and its tracks and password links.
+// DeleteAlbum removes an album; foreign keys cascade to its tracks and password links.
 func (s *Store) DeleteAlbum(id int64) error {
-	tx, err := s.db.Begin()
-	if err != nil {
-		return err
-	}
-	defer tx.Rollback()
-
-	tx.Exec("DELETE FROM album_tracks WHERE album_id = ?", id)
-	tx.Exec("DELETE FROM password_album_access WHERE album_id = ?", id)
-	tx.Exec("DELETE FROM albums WHERE id = ?", id)
-	return tx.Commit()
+	_, err := s.db.Exec("DELETE FROM albums WHERE id = ?", id)
+	return err
 }
 
 // AlbumCount returns the total number of albums.
@@ -354,17 +350,23 @@ func (s *Store) UpdatePassword(id int64, label string, passphrase *string, album
 		if err != nil {
 			return fmt.Errorf("hash password: %w", err)
 		}
-		if _, err := tx.Exec(
+		res, err := tx.Exec(
 			"UPDATE listener_passwords SET label = ?, password_hash = ?, updated_at = ? WHERE id = ?",
 			label, string(hash), now, id,
-		); err != nil {
+		)
+		if err := requireRow(res, err); err != nil {
+			return err
+		}
+		// A rotated passphrase must cut off listeners who signed in with the old one.
+		if _, err := tx.Exec("DELETE FROM sessions WHERE password_id = ?", id); err != nil {
 			return err
 		}
 	} else {
-		if _, err := tx.Exec(
+		res, err := tx.Exec(
 			"UPDATE listener_passwords SET label = ?, updated_at = ? WHERE id = ?",
 			label, now, id,
-		); err != nil {
+		)
+		if err := requireRow(res, err); err != nil {
 			return err
 		}
 	}
@@ -386,41 +388,56 @@ func (s *Store) UpdatePassword(id int64, label string, passphrase *string, album
 	return tx.Commit()
 }
 
-// DeletePassword removes a password and its album links.
+// DeletePassword removes a password, its album links (by cascade), and the
+// listener sessions it opened.
 func (s *Store) DeletePassword(id int64) error {
 	tx, err := s.db.Begin()
 	if err != nil {
 		return err
 	}
 	defer tx.Rollback()
-	tx.Exec("DELETE FROM password_album_access WHERE password_id = ?", id)
-	tx.Exec("DELETE FROM listener_passwords WHERE id = ?", id)
+	if _, err := tx.Exec("DELETE FROM sessions WHERE password_id = ?", id); err != nil {
+		return err
+	}
+	if _, err := tx.Exec("DELETE FROM listener_passwords WHERE id = ?", id); err != nil {
+		return err
+	}
 	return tx.Commit()
 }
 
 // VerifyPassword checks a passphrase against all stored password hashes.
 // Returns the matching password ID, or 0 if nothing matched.
+// ponytail: one bcrypt compare per stored password; fine for the handful a
+// private release has, index a fast pre-hash if that grows to hundreds.
 func (s *Store) VerifyPassword(passphrase string) (int64, error) {
+	type candidate struct {
+		id   int64
+		hash []byte
+	}
+	var candidates []candidate
 	rows, err := s.db.Query("SELECT id, password_hash FROM listener_passwords")
 	if err != nil {
 		return 0, err
 	}
-	defer rows.Close()
-
 	for rows.Next() {
-		var id int64
-		var hash string
-		if err := rows.Scan(&id, &hash); err != nil {
+		var c candidate
+		if err := rows.Scan(&c.id, &c.hash); err != nil {
+			rows.Close()
 			return 0, err
 		}
-		if bcrypt.CompareHashAndPassword([]byte(hash), []byte(passphrase)) == nil {
-			return id, nil
-		}
+		candidates = append(candidates, c)
 	}
+	rows.Close()
 	if err := rows.Err(); err != nil {
 		return 0, err
 	}
 
+	// Compare after releasing the connection: each bcrypt check takes ~50ms.
+	for _, c := range candidates {
+		if bcrypt.CompareHashAndPassword(c.hash, []byte(passphrase)) == nil {
+			return c.id, nil
+		}
+	}
 	return 0, nil
 }
 
@@ -479,6 +496,34 @@ func (s *Store) getAlbumIDsForPassword(passwordID int64) ([]int64, error) {
 	return ids, rows.Err()
 }
 
+// requireRow turns an UPDATE that matched nothing into ErrNotFound.
+func requireRow(res sql.Result, err error) error {
+	if err != nil {
+		return err
+	}
+	if n, err := res.RowsAffected(); err != nil {
+		return err
+	} else if n == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
+// UnknownAlbumIDs returns the ids that name no album.
+func (s *Store) UnknownAlbumIDs(ids []int64) ([]int64, error) {
+	var unknown []int64
+	for _, id := range ids {
+		var n int
+		if err := s.db.QueryRow("SELECT COUNT(*) FROM albums WHERE id = ?", id).Scan(&n); err != nil {
+			return nil, err
+		}
+		if n == 0 {
+			unknown = append(unknown, id)
+		}
+	}
+	return unknown, nil
+}
+
 // --- Slug generation ---
 
 var slugRe = regexp.MustCompile(`[^a-z0-9]+`)
@@ -493,11 +538,12 @@ func generateSlug(title string) string {
 	return slug
 }
 
-func (s *Store) uniqueSlug(base string) (string, error) {
+// uniqueSlug returns base, or base-N, unused by any album other than excludeID.
+func (s *Store) uniqueSlug(base string, excludeID int64) (string, error) {
 	slug := base
 	for i := 2; ; i++ {
 		var count int
-		if err := s.db.QueryRow("SELECT COUNT(*) FROM albums WHERE slug = ?", slug).Scan(&count); err != nil {
+		if err := s.db.QueryRow("SELECT COUNT(*) FROM albums WHERE slug = ? AND id != ?", slug, excludeID).Scan(&count); err != nil {
 			return "", err
 		}
 		if count == 0 {
