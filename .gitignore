@@ -8,7 +8,6 @@ data/
 *.exe
 acetate
 acetate-server
-hashpass
 
 # IDE
 .vscode/
@@ -23,3 +22,6 @@ Thumbs.db
 # Test artifacts
 *.test
 coverage.out
+
+# Local secrets
+.env
